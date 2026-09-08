@@ -5,3 +5,12 @@
 2. Execute research of best number of electrodes
 3. Execute research of ratio with static and dynamic
 4. Execute research of comparison with candidates
+
+# Datasets
+## SEED-VLA
+
+## SEED-VIG
+
+## TUEV
+
+## TUAB
