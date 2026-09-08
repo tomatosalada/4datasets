@@ -81,6 +81,23 @@ EEG Feature Extraction (DE) and Binary Label Generation for SEED-VIG
 ================================================================================
 ```
 
+**project_files**
+```text
+project_root/
+├── GNN/                          # Graph Neural Network (GNN) models and related scripts
+├── LOSO_pretrainedmodel/         # Leave-One-Subject-Out (LOSO) pretrained model weights
+├── model/                        # Model architecture definitions (e.g., EEGNet)
+├── research_number_of_electrodes/# Evaluation scripts for total electrode count
+├── research_ratio_staticdynamic/ # Experiments on static vs. dynamic channel selection ratios
+├── research_try_candidate/       # Validation scripts for candidate channel selection
+└── select_net/               # Channel selection algorithms and utilities
+```
+
+**execute order**
+```text
+LOSO_pretrainedmodel → research_number_of_electrodes → research_ratio_staticdynamic → research_try_candidate
+(Exclude Subject 10 due to completely skewed (single-class) labels)
+```
 
 ## TUEV
 **preprocessing**
