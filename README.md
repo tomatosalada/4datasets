@@ -8,6 +8,7 @@
 
 # Datasets
 ## SEED-VLA
+**preprocessing**
 ```text
 ================================================================================
 Binary Label Generation from Raw PERCLOS
@@ -31,8 +32,8 @@ Binary Label Generation from Raw PERCLOS
 ```
 
 ## SEED-VIG
+**preprocessing**
 ```text:
-### preprocessing
 ================================================================================
 EEG Feature Extraction (DE) and Binary Label Generation for SEED-VIG
 ================================================================================
