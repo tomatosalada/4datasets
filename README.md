@@ -8,12 +8,13 @@
 
 # Datasets
 ## SEED-VLA
-**- preprocessing:**
+- preprocessing
 
 ## SEED-VIG
-
+- preprocessing
 
 ## TUEV
-
+- preprocessing
 
 ## TUAB
+- preprocessing
