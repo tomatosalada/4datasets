@@ -66,7 +66,78 @@ EEG Feature Extraction (DE) and Binary Label Generation for SEED-VIG
 
 
 ## TUEV
+**preprocessing**
+```text
+================================================================================
+EEG Preprocessing & Differential Entropy (DE) Extraction for TUH EEG Event (TUEV)
+================================================================================
 
+[Dataset Overview: TUH EEG Event Corpus (TUEV v2.0.0)]
+  - Task                 : Multi-class EEG event detection / classification (6 classes)
+  - Target Classes       : 1: spsw (spike and slow wave)
+                           2: gped (generalized periodic epileptiform discharge)
+                           3: pled (periodic lateralized epileptiform discharge)
+                           4: eyem (eye movement)
+                           5: artf (artifact)
+                           6: bckg (background)
+  - Channel Montage      : Standard ACNS TCP montage (16 bipolar differential channels)
+                           Channels 0–7 & 14–21 (Temporal and Parasagittal chains)
 
+[Step 1: Signal Preprocessing]
+  - Filtering            : Bandpass filter 0.1–75.0 Hz; Notch filter at 50.0 Hz
+  - Resampling           : Resampled to 256 Hz
+  - Event Windowing      : Event start/stop extracted from .rec files with +/- 2.0 s padding
+
+[Step 2: Differential Entropy (DE) Feature Extraction]
+  - Frequency Bands (5)  : Delta (1-4 Hz), Theta (4-8 Hz), Alpha (8-14 Hz),
+                           Beta (14-31 Hz), Gamma (31-50 Hz) (Butterworth bandpass, order=3)
+  - Time Segmentation    : 10 temporal windows per event window
+  - Feature Array Shape  : (Events, Channels=16, TimeWindows=10, Bands=5)
+
+[Step 3: Subject-wise Splitting & Dataset Export]
+  - Split Strategy       : Subject-independent split on training data
+                           - Train Set : 80% of unique subjects from train folder
+                           - Val Set   : 20% of unique subjects from train folder
+                           - Eval Set  : Benchmark evaluation set kept completely disjoint
+  - Output Files (.npy)  : Saved to designated root_save directory
+                           - {train, val, eval}_data.npy        : Extracted DE features
+                           - {train, val, eval}_labels.npy      : Event class labels (1–6)
+                           - {train, val, eval}_subject_ids.npy : Subject identifiers
+                           - count.txt                          : Summary of subjects & sample counts
+================================================================================
+```
 
 ## TUAB
+**preprocessing**
+```text
+================================================================================
+Differential Entropy (DE) Extraction for TUH Abnormal EEG Corpus (TUAB)
+================================================================================
+
+[Dataset Overview: TUH Abnormal EEG Corpus (TUAB v3.0.1)]
+  - Task                 : Binary EEG classification (Normal vs. Abnormal)
+  - Data Configuration   : Standard TCP AR montage (16 channels)
+  - Input Format         : Preprocessed .pkl files partitioned into train / val / test
+                           * X: Segmented EEG signal [16 channels, 2,560 points (10 s @ 256 Hz)]
+                           * y: Clinical label (Normal / Abnormal)
+                           * Skip samples that do not match the expected 2,560 points
+
+[Step 1: Differential Entropy (DE) Feature Extraction]
+  - Sampling Rate        : fs = 256 Hz
+  - Window Size          : 0.5 s window (128 samples) -> 20 temporal windows per 10 s epoch
+  - Frequency Bands (5)  : Delta (1-4 Hz), Theta (4-8 Hz), Alpha (8-14 Hz),
+                           Beta (14-31 Hz), Gamma (31-50 Hz) (Butterworth bandpass, order=3)
+  - Filtering Method     : Zero-phase forward-backward digital filtering (filtfilt) along axis=1
+  - DE Calculation       : 0.5 * ln(2 * pi * e * variance + 1e-10)
+  - Feature Array Shape  : (N_samples, Channels=16, TimeWindows=20, Bands=5)
+
+[Step 2: Parallel Processing & Dataset Export]
+  - Execution            : Multi-process extraction via multiprocessing.Pool across splits
+  - Splits Processed     : train, val, test
+  - Metadata Handling    : Subject IDs parsed from filename prefixes (e.g., "aaaaamye" from file string)
+  - Output Files (.npy)  : Saved to designated output directory
+                           - {train, val, test}_data.npy        : Extracted DE features [N, 16, 20, 5]
+                           - {train, val, test}_labels.npy      : Classification labels [N]
+                           - {train, val, test}_subject_ids.npy : Corresponding subject IDs [N]
+================================================================================
+```
