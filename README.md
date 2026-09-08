@@ -31,7 +31,7 @@ Binary Label Generation from Raw PERCLOS
 ```
 
 ## SEED-VIG
-```text
+```text:preprocessing
 ================================================================================
 EEG Feature Extraction (DE) and Binary Label Generation for SEED-VIG
 ================================================================================
