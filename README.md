@@ -8,7 +8,9 @@
 
 # Datasets
 ## SEED-VLA
-'''preprocessing
+'''
+
+preprocessing
     # Binary Label Generation from Raw PERCLOS
 
 ## Label Definition
@@ -24,6 +26,7 @@
 ## Input Data
 - `processdData/subject_wise/label_{s}.npy`: Raw PERCLOS values
 - `processdData/subject_wise/eeg_{s}.npy`: EEG data array of shape $(N_s, 16, 5, 18)$
+
 '''
 
 ## SEED-VIG
