@@ -44,9 +44,9 @@ project_root/
 ```
 
 **execute order**
-'''text
+```text
 LOSO_pretrainedmodel → research_number_of_electrodes → research_ratio_staticdynamic → research_try_candidate
-'''
+```
 
 ## SEED-VIG
 **preprocessing**
