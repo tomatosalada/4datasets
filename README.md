@@ -141,6 +141,11 @@ EEG Preprocessing & Differential Entropy (DE) Extraction for TUH EEG Event (TUEV
 ================================================================================
 ```
 
+**execute order**
+```text
+HoldOut_pretrainedmodel → research_number_of_electrodes → research_ratio_staticdynamic → research_try_candidate
+```
+
 ## TUAB
 **preprocessing**
 ```text
@@ -174,4 +179,9 @@ Differential Entropy (DE) Extraction for TUH Abnormal EEG Corpus (TUAB)
                            - {train, val, test}_labels.npy      : Classification labels [N]
                            - {train, val, test}_subject_ids.npy : Corresponding subject IDs [N]
 ================================================================================
+```
+
+**execute order**
+```text
+HoldOut_pretrainedmodel → research_number_of_electrodes → research_ratio_staticdynamic → research_try_candidate
 ```
