@@ -1,6 +1,6 @@
 """SEED-VIG における固定電極 / 動的電極の割合を LOSO で比較する。
 
-`research_number_of_electrode/loso_researchbestnum_vig_optunar.py` と同じ
+`research_number_of_electrode/loso_researchbestnum_vig_optunar_best_same_settion.py` と同じ
 Optuna 教師モデル、fold 別モデル構造、保存済み教師標準化統計、学生モデルの
 global normalization、fold 別の学習率・batch size・weight decayを使用する。
 固定/動的電極の切り分けだけを追加し、既定のfoldランキングではターゲット
@@ -10,9 +10,9 @@ global normalization、fold 別の学習率・batch size・weight decayを使用
 選択する。F=0 は全て動的、F=TOTAL は静的電極選択のベースラインである。
 
 例:
-    python research_ratio_fixdynamic/ratio_fixdynamic_forpaper_vig_optunar.py
-    python research_ratio_fixdynamic/ratio_fixdynamic_forpaper_vig_optunar.py --total 5
-    python research_ratio_fixdynamic/ratio_fixdynamic_forpaper_vig_optunar.py \
+    python research_ratio_fixdynamic/ratio_fixdynamic_forpaper_vig_optunar_best_same_settion.py
+    python research_ratio_fixdynamic/ratio_fixdynamic_forpaper_vig_optunar_best_same_settion.py --total 5
+    python research_ratio_fixdynamic/ratio_fixdynamic_forpaper_vig_optunar_best_same_settion.py \
         --only-fix 2 --only-target 9_20151017_night --epochs 1
 """
 
@@ -42,7 +42,7 @@ from sklearn.metrics import (accuracy_score, balanced_accuracy_score, classifica
                              f1_score, precision_score, recall_score)
 from torch.utils.data import DataLoader, TensorDataset
 
-from select_channel.select_net_class_optunar import gcn_select_net
+from select_channel.select_net_class_optunar_same import gcn_select_net
 from model.EEGNet import CustomEEGNet
 
 warnings.filterwarnings("ignore")
@@ -53,19 +53,19 @@ warnings.filterwarnings("ignore")
 DATA_DIR = '/mnt/data/toshiki.ohno/EEG_fatigue/EEG_analysis_SEED-VIG/processedData/subject_wise_2class'
 
 # LOSO fold ごとの Optuna 教師モデル、設定JSON、標準化統計量の置き場。
-# CHEAT_SHEET_DIR で別の LOSO_VIG_optunar.py 出力先に変更できる。
+# 環境変数 CHEAT_SHEET_DIR で別の same_settion 教師出力先に変更できる。
 CHEAT_SHEET_DIR = os.environ.get(
     'CHEAT_SHEET_DIR',
     os.path.abspath(os.path.join(
         os.path.dirname(__file__), '..', 'optunar_LOSO',
-        'LOSO_GCN_Optuna_InnerHoldout3_SEEDVIG')))
+        'LOSO_GCN_Optuna_SEEDVIG_sessionLOSO_same')))
 
 CHEAT_SHEET_TAG = '_'.join(
     [p for p in CHEAT_SHEET_DIR.rstrip('/').split('/')[-2:] if p])
 
 RESEARCH_BASE_DIR = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_analysis_SEED-VIG/'
                      'research_ratio_fixdynamic/'
-                     'results_ratio_seedvig_2class_optuna_2/')
+                     'results_ratio_seedvig_2class_optuna_best_same_settion/')
 
 NUM_CLASSES = 2
 CLASS_NAMES = ['Awake', 'Fatigue']
@@ -90,24 +90,30 @@ SUBJECT_LIST = [
     '15_20151126_night', '16_20151128_night', '17_20150925_noon', '18_20150926_noon',
     '19_20151114_noon', '20_20151129_night', '21_20151016_noon'
 ]
-# 乱数種を被験者IDから決めるための通し番号。文字列hashは PYTHONHASHSEED でプロセス毎に
+# セッションIDの通し番号。文字列hashは PYTHONHASHSEED でプロセス毎に
 # 変わり再現性が壊れるため、リスト上の位置を使う。
-SUBJECT_INDEX = {s: i for i, s in enumerate(SUBJECT_LIST)}
+SESSION_INDEX = {session: index for index, session in enumerate(SUBJECT_LIST)}
 
-# ラベル分布から「両クラスを十分持つ被験者」を判定する閾値（少数クラスの割合）。
+
+def select_sessions(session_ids, available_sessions):
+    """指定したセッションIDに対応する利用可能セッションを元の順序で返す。"""
+    session_set = set(session_ids)
+    return [session for session in available_sessions if session in session_set]
+
+# ラベル分布から「両クラスを十分持つセッション」を判定する閾値（少数クラスの割合）。
 MIN_MINORITY_RATIO = 0.02
 
 # Optuna教師による電極数スイープで Accuracy / Balanced Accuracy が最大の電極数。
-DEFAULT_TOTAL_ELECTRODES = 6
+DEFAULT_TOTAL_ELECTRODES = 8
 
 # --ranking global 用の共通ランキング (重要度が高い順)。
 # Optuna教師の loso_report.txt の colmean / clsrow を埋め込んだもの。
 # ターゲット情報を含むため比較用にのみ残し、既定では fold ranking を使用する。
 GLOBAL_IMPORTANCE_RANKINGS = {
-    'col': ['CP1', 'P2', 'CP2', 'T7', 'PO4', 'P1', 'PO3', 'PZ', 'FT7',
-            'FT8', 'T8', 'OZ', 'TP8', 'O1', 'POZ', 'O2', 'TP7'],
-    'cls': ['T7', 'P2', 'CP1', 'PO3', 'T8', 'PO4', 'FT7', 'P1', 'CP2',
-            'O1', 'FT8', 'O2', 'TP8', 'POZ', 'PZ', 'OZ', 'TP7'],
+    'col': ['CP1', 'T8', 'FT7', 'CP2', 'PO3', 'P2', 'T7', 'FT8', 'PO4',
+            'TP8', 'P1', 'O1', 'POZ', 'OZ', 'PZ', 'O2', 'TP7'],
+    'cls': ['T7', 'PO3', 'T8', 'P2', 'CP1', 'FT7', 'O1', 'PO4', 'TP8',
+            'FT8', 'P1', 'POZ', 'O2', 'CP2', 'OZ', 'PZ', 'TP7'],
 }
 for _ranking in GLOBAL_IMPORTANCE_RANKINGS.values():
     assert sorted(_ranking) == sorted(CHANNEL_NAMES), \
@@ -116,7 +122,7 @@ for _ranking in GLOBAL_IMPORTANCE_RANKINGS.values():
 SEED = 42
 BATCH_SIZE = 128
 
-# 学習設定。loso_researchbestnum_vig_optunar.py と同一にする。
+# 学習設定。loso_researchbestnum_vig_optunar_best_same_settion.py と同一にする。
 # F=0 (全て動的) の条件は電極数スイープの TOTAL ch と同条件でなければ比較できないので、
 # learning rate / batch size / weight decay はいずれもfold別Optuna最良値を使用する。
 LAMBDA_SPARSITY = 1e-3   # --select threshold のときだけ効く (topk では罰則なし)
@@ -134,7 +140,7 @@ CLASS_WEIGHT = 'none'
 GATE_FEAT = 'band'          # Gate に渡す EEG 特徴。band: 帯域を残して [B,5,17]->85次元
                             # mean(旧): 時間も帯域も平均して [B,17]。眠気で効く帯域差が消える
 GATE_TEACHER = 'fold_const'  # 教師の電極重要度の入れ方。
-                            # fold_const: 学習被験者平均の1本をfold内の全サンプルに配る
+                            # fold_const: 学習セッション平均の1本をfold内の全サンプルに配る
                             #             -> per-sample の通信路が消え、動くのは EEG だけ
                             # per_sample(旧): サンプルごとの重要度をそのまま渡す
                             # none: 教師を Gate 入力から外す
@@ -146,7 +152,7 @@ MASK_RANDOMIZE = 0.3        # 学習時にこの確率で可変チャネルの�
                             # 符号として読むのを防ぐ。0で無効
 
 # 1つのGPUに載せる並列プロセス数
-PROCESSES_PER_GPU = 5
+PROCESSES_PER_GPU = 8
 
 # Optuna教師の fold ごとのネットワーク構造を復元するためのキー。
 OPTUNA_MODEL_PARAM_KEYS = (
@@ -154,10 +160,11 @@ OPTUNA_MODEL_PARAM_KEYS = (
     'gnn_dropout', 'num_attention_heads', 'gnn_heads', 'cnn_out_channels',
 )
 
-# 電極数スイープと同一のOptuna教師キャッシュを共有する。
-TEACHER_CACHE_DIR = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_analysis_SEED-VIG/'
-                     'research_number_of_electrode/'
-                     'results_bestnum_seedvig_2class_optuna_2/teacher_cache')
+# researchbestnum のセッションLOSOと同一のOptuna教師キャッシュを共有する。
+TEACHER_CACHE_DIR = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), '..', 'research_number_of_electrode',
+    'results_bestnum_seedvig_2class_optuna_best_sessionLOSO_same_settion',
+    'teacher_cache'))
 
 # トポマップで補間結果を描く範囲。最寄りの実電極からこの距離を超える領域は
 # 塗らずに残す（頭部円の半径1に対する比）。
@@ -192,37 +199,42 @@ COORDS = {
 # 0. データ
 # =========================================================================
 def build_manifest():
-    """ラベル分布から EEG_VLA 版の paper_manifest.json 相当の情報を組み立てる。
-
-    SEED-VIG には manifest ファイルが無いので実行時に作る。判定基準は EEG_VLA 版と同じで、
-    少数クラスが MIN_MINORITY_RATIO 未満のセッションは「退化」扱いにし、
-    ターゲットには含めるが主指標の集計からは分けて報告する（学習には使う）。
-    """
-    kept, balanced, missing, counts = [], [], [], {}
-    for s in SUBJECT_LIST:
-        label_path = os.path.join(DATA_DIR, f'label_{s}.npy')
-        eeg_path = os.path.join(DATA_DIR, f'eeg_{s}.npy')
-        if not (os.path.exists(label_path) and os.path.exists(eeg_path)):
-            missing.append(s)
+    """配置済みSEED-VIGデータを検査し、セッション単位の実行対象を決定する。"""
+    kept_sessions, missing_sessions, session_counts = [], [], {}
+    for session in SUBJECT_LIST:
+        eeg_path = os.path.join(DATA_DIR, f'eeg_{session}.npy')
+        label_path = os.path.join(DATA_DIR, f'label_{session}.npy')
+        if not (os.path.exists(eeg_path) and os.path.exists(label_path)):
+            missing_sessions.append(session)
             continue
-        y = np.load(label_path)
-        n0 = int((y == 0).sum())
-        n1 = int((y == 1).sum())
-        counts[s] = {'n': int(len(y)), 'n_awake': n0, 'n_fatigue': n1}
-        kept.append(s)
-        if min(n0, n1) >= MIN_MINORITY_RATIO * len(y):
-            balanced.append(s)
+
+        y = np.load(label_path, mmap_mode='r')
+        n_awake = int((y == 0).sum())
+        n_fatigue = int((y == 1).sum())
+        session_counts[session] = {
+            'n': int(len(y)),
+            'n_awake': n_awake,
+            'n_fatigue': n_fatigue,
+        }
+        kept_sessions.append(session)
+
+    balanced_sessions = []
+    for session in kept_sessions:
+        counts = session_counts[session]
+        if min(counts['n_awake'], counts['n_fatigue']) >= (
+                MIN_MINORITY_RATIO * counts['n']):
+            balanced_sessions.append(session)
 
     return {
-        'kept_subjects': kept,
-        'loso_target_subjects': balanced,
+        'kept_sessions': kept_sessions,
+        'loso_target_sessions': balanced_sessions,
         'labeling_rule': 'PERCLOS < 0.35 -> 0 (Awake), >= 0.35 -> 1 (Fatigue)',
-        'excluded_subjects': missing,
-        'class_counts': counts,
+        'excluded_sessions': missing_sessions,
+        'session_class_counts': session_counts,
     }
 
 
-def normalize_subject(x, mode):
+def normalize_session(x, mode):
     if mode in ('none', 'global'):
         return x
     if mode == 'subject':
@@ -239,7 +251,7 @@ def prep_tag(normalize):
 
 
 def load_optuna_fold_config(target):
-    """LOSO_VIG_optunar.py が保存した target 固有の最良設定を読む。"""
+    """LOSO_VIG_optunar_same_settion.py が保存したtarget固有の最良設定を読む。"""
     candidates = [
         os.path.join(CHEAT_SHEET_DIR, f'fold_target_{target}.json'),
         os.path.join(CHEAT_SHEET_DIR, f'inner_target_{target}.json'),
@@ -273,7 +285,7 @@ def load_optuna_standardizer(target):
     if not os.path.exists(path):
         raise FileNotFoundError(
             f'fold {target} の標準化統計量がありません: {path}\n'
-            'LOSO_VIG_optunar.py の出力一式を指定してください。')
+            'LOSO_VIG_optunar_same_settion.py の出力一式を指定してください。')
     with np.load(path) as values:
         if 'mean' not in values or 'std' not in values:
             raise ValueError(f'{path}: mean/std がありません')
@@ -282,23 +294,23 @@ def load_optuna_standardizer(target):
     return mean, std, path
 
 
-def load_subject_x(subject_id, normalize):
-    x = np.load(os.path.join(DATA_DIR, f'eeg_{subject_id}.npy')).astype(np.float32)
-    return normalize_subject(x, normalize)
+def load_session_x(session, normalize):
+    x = np.load(os.path.join(DATA_DIR, f'eeg_{session}.npy')).astype(np.float32)
+    return normalize_session(x, normalize)
 
 
-def load_subjects(subject_ids, normalize):
+def load_sessions(session_ids, normalize):
     xs, ys = [], []
-    for s in subject_ids:
-        xs.append(load_subject_x(s, normalize))
+    for s in session_ids:
+        xs.append(load_session_x(s, normalize))
         ys.append(np.load(os.path.join(DATA_DIR, f'label_{s}.npy')))
     x = torch.FloatTensor(np.concatenate(xs, axis=0))
     y = torch.LongTensor(np.concatenate(ys, axis=0).astype(np.int64))
     return x, y
 
 
-def class_weights(subject_ids, mode, device):
-    """CrossEntropyLoss 用のクラス重みを作る。【学習被験者のラベルだけ】から計算する。
+def class_weights(session_ids, mode, device):
+    """CrossEntropyLoss 用のクラス重みを【学習セッションのラベルだけ】から計算する。
 
     loso_paper_2class_validation.py と同一実装。'balanced' は sklearn の
     class_weight='balanced' と同じ w_c = N / (C * n_c)。sum(n_c * w_c) = N なので
@@ -307,7 +319,7 @@ def class_weights(subject_ids, mode, device):
     if mode == 'none':
         return None
     y = np.concatenate([np.load(os.path.join(DATA_DIR, f'label_{s}.npy'))
-                        for s in subject_ids])
+                        for s in session_ids])
     n = len(y)
     counts = np.array([(y == c).sum() for c in range(NUM_CLASSES)], dtype=np.float64)
     if mode == 'balanced':
@@ -316,39 +328,39 @@ def class_weights(subject_ids, mode, device):
     raise ValueError(f'unknown class_weight mode: {mode}')
 
 
-def fold_constant_importance(teacher_cache, train_subjects):
-    """fold 内で共通に使う教師の電極重要度 [17] を、【学習被験者だけ】から作る。
+def fold_constant_importance(teacher_cache, train_sessions):
+    """fold 内で共通に使う教師の電極重要度 [17] を、学習セッションだけから作る。
 
     per-sample の重要度をそのまま Gate に渡すと、それがサンプルごとの通信路になって
     マスクの中身を決めてしまう。fold 単位の定数にすれば「どの電極が有用か」という
     事前分布だけが残り、サンプルごとに動くのは EEG だけになる。
     fold_ranking() が固定電極を選ぶのに使うベクトルと同一の量。
     """
-    return np.concatenate([teacher_cache[f'imp_{s}'] for s in train_subjects],
+    return np.concatenate([teacher_cache[f'imp_{s}'] for s in train_sessions],
                           axis=0).mean(axis=0)
 
 
-def make_loader(subject_ids, shuffle, teacher_cache, normalize,
+def make_loader(session_ids, shuffle, teacher_cache, normalize,
                 imp_override=None, generator=None, train_mean=None, train_std=None,
                 batch_size=BATCH_SIZE):
     """入力・ラベルに加えて、キャッシュ済みの教師出力も一緒に流すローダ。
 
-    teacher_cache は build_teacher_cache() が作った npz (被験者ごとに
-    hints_{s} [n,2] / imp_{s} [n,17])。load_subjects と同じ被験者順で
+    teacher_cache は build_teacher_cache() が作った npz (セッションごとに
+    hints_{s} [n,2] / imp_{s} [n,17])。load_sessions と同じセッション順で
     連結するのでサンプルの対応はずれない。
 
     imp_override [17] を渡すと、教師の電極重要度を全サンプルその値に置き換える
     (GATE_TEACHER='fold_const')。キャッシュは per-sample のまま作ってあるので、
     ここで潰すだけでよく、キャッシュの作り直しは要らない。
     """
-    x, y = load_subjects(subject_ids, normalize)
+    x, y = load_sessions(session_ids, normalize)
     if normalize == 'global' and train_mean is not None and train_std is not None:
         x = (x - train_mean) / (train_std + 1e-8)
     hints = torch.FloatTensor(
-        np.concatenate([teacher_cache[f'hints_{s}'] for s in subject_ids], axis=0))
+        np.concatenate([teacher_cache[f'hints_{s}'] for s in session_ids], axis=0))
     if imp_override is None:
         imp = torch.FloatTensor(
-            np.concatenate([teacher_cache[f'imp_{s}'] for s in subject_ids], axis=0))
+            np.concatenate([teacher_cache[f'imp_{s}'] for s in session_ids], axis=0))
     else:
         imp = torch.FloatTensor(
             np.repeat(np.asarray(imp_override, dtype=np.float32)[None, :], len(x), axis=0))
@@ -358,9 +370,9 @@ def make_loader(subject_ids, shuffle, teacher_cache, normalize,
 
 
 def find_cheat_sheet(target):
-    """fold (ターゲット被験者) に対応する教師モデルのパスを返す。
+    """fold (ターゲットセッション) に対応する教師モデルのパスを返す。
 
-    そのfoldの学習被験者だけで学習された重みを使うので、ターゲット被験者は
+    そのfoldの学習セッションだけで学習された重みを使うので、ターゲットセッションは
     教師モデルにも一切入っていない。
     """
     candidates = [os.path.join(CHEAT_SHEET_DIR, f'model_target_{target}.pth'),
@@ -448,8 +460,8 @@ def teacher_cache_path(cache_dir, mode, target, normalize):
 
 
 @torch.no_grad()
-def build_teacher_cache(target, subjects, mode, device, cache_dir, normalize):
-    """Optuna教師の出力を全被験者について一度だけ計算して保存する。"""
+def build_teacher_cache(target, sessions, mode, device, cache_dir, normalize):
+    """Optuna教師の出力を全セッションについて一度だけ計算して保存する。"""
     path = teacher_cache_path(cache_dir, mode, target, normalize)
     if os.path.exists(path):
         return path
@@ -458,7 +470,7 @@ def build_teacher_cache(target, subjects, mode, device, cache_dir, normalize):
     if cheat_path is None:
         raise FileNotFoundError(
             f"fold {target} の教師モデルが {CHEAT_SHEET_DIR} にありません。\n"
-            f"先に optunar_LOSO/LOSO_VIG_optunar.py を実行してください。")
+            f"先に optunar_LOSO/LOSO_VIG_optunar_same_settion.py を実行してください。")
 
     optuna_config, config_path = load_optuna_fold_config(target)
     optuna_params = optuna_config['params']
@@ -471,18 +483,20 @@ def build_teacher_cache(target, subjects, mode, device, cache_dir, normalize):
     train_mean, train_std, standardizer_path = load_optuna_standardizer(target)
     teacher_batch_size = int(optuna_params.get('batch_size', BATCH_SIZE))
 
-    out = {}
-    for s in subjects:
-        x, _ = load_subjects([s], 'none')
+    def compute(s, teacher_model=model):
+        x, _ = load_sessions([s], 'none')
         x = (x - train_mean) / (train_std + 1e-8)
         hints, imps = [], []
         for i in range(0, len(x), teacher_batch_size):
             h, m = teacher_outputs(
-                model, x[i:i + teacher_batch_size].to(device), mode)
+                teacher_model, x[i:i + teacher_batch_size].to(device), mode)
             hints.append(h.cpu())
             imps.append(m.cpu())
-        out[f'hints_{s}'] = torch.cat(hints).numpy()
-        out[f'imp_{s}'] = torch.cat(imps).numpy()
+        return torch.cat(hints).numpy(), torch.cat(imps).numpy()
+
+    out = {}
+    for s in sessions:
+        out[f'hints_{s}'], out[f'imp_{s}'] = compute(s)
     out['optuna_params_json'] = np.asarray(
         json.dumps(optuna_params, sort_keys=True), dtype=str)
     out['optuna_config_path'] = np.asarray(config_path, dtype=str)
@@ -624,26 +638,26 @@ class ConceptDynamicNet(nn.Module):
 # =========================================================================
 # 3. 固定電極の選び方 (重要度ランキング)
 # =========================================================================
-def fold_ranking(teacher_cache, train_subjects):
-    """そのfoldの学習被験者のサンプルだけから電極重要度ランキングを作る。
+def fold_ranking(teacher_cache, train_sessions):
+    """そのfoldの学習セッションのサンプルだけから電極重要度ランキングを作る。
 
-    teacher_cache の imp_{s} は、そのfoldの教師 (= 学習被験者だけで学習) が出した
-    サンプルごとの電極重要度 (電極方向のz-score)。学習被験者分だけを平均するので、
-    ターゲット被験者の情報はランキングに一切入らない。
+    teacher_cache の imp_{s} は、そのfoldの教師 (= 学習セッションだけで学習) が出した
+    サンプルごとの電極重要度 (電極方向のz-score)。学習セッション分だけを平均するので、
+    ターゲットセッションの情報はランキングに一切入らない。
 
     returns: (ランキング(重要度の高い順の電極名), 平均重要度ベクトル [17])
     """
-    imp = np.concatenate([teacher_cache[f'imp_{s}'] for s in train_subjects],
+    imp = np.concatenate([teacher_cache[f'imp_{s}'] for s in train_sessions],
                          axis=0).mean(axis=0)                      # [17]
     order = np.argsort(imp)[::-1]
     return [CHANNEL_NAMES[i] for i in order], imp
 
 
-def resolve_ranking(mode, teacher_importance, teacher_cache, train_subjects):
+def resolve_ranking(mode, teacher_importance, teacher_cache, train_sessions):
     """--ranking の指定に応じて、固定電極を選ぶ順序を返す。"""
     if mode == 'global':
         return list(GLOBAL_IMPORTANCE_RANKINGS[teacher_importance]), None
-    return fold_ranking(teacher_cache, train_subjects)
+    return fold_ranking(teacher_cache, train_sessions)
 
 
 # =========================================================================
@@ -757,11 +771,11 @@ def plot_confusion(trues, preds, out_path, title):
 
 
 # =========================================================================
-# 5. 1 fold (固定数 x ターゲット被験者) の学習・評価
+# 5. 1 fold (固定数 x ターゲットセッション) の学習・評価
 # =========================================================================
 @torch.no_grad()
 def evaluate(model, loader, device, loss_fn):
-    """ターゲット被験者での評価。ゲートの選定状況もクラス別に集計する。"""
+    """ターゲットセッションでの評価。ゲートの選定状況もクラス別に集計する。"""
     model.eval()
     total_loss, n_batch = 0.0, 0
     trues, preds = [], []
@@ -814,8 +828,11 @@ def run_fold(total, num_fixed, target, kept, epochs, teacher_importance, ranking
              normalize=NORMALIZE, class_weight=CLASS_WEIGHT,
              gate_feat=GATE_FEAT, gate_teacher=GATE_TEACHER, gate_hints=GATE_HINTS,
              select=SELECT, mask_randomize=MASK_RANDOMIZE):
-    """総電極数 total・固定数 num_fixed・ターゲット被験者 target の LOSO fold を1本実行する。"""
-    train_subjects = [s for s in kept if s != target]
+    """総電極数 total・固定数 num_fixed・ターゲットセッションのLOSO foldを1本実行する。"""
+    train_sessions = [session for session in kept if session != target]
+    target_sessions = select_sessions([target], kept)
+    if not target_sessions:
+        raise ValueError(f'targetセッション {target}がありません')
     optuna_config, optuna_config_path = load_optuna_fold_config(target)
     _, _, teacher_standardizer_path = load_optuna_standardizer(target)
     learning_rate = float(optuna_config['params']['learning_rate'])
@@ -832,7 +849,7 @@ def run_fold(total, num_fixed, target, kept, epochs, teacher_importance, ranking
             f'{optuna_config_path}: weight_decay は0以上が必要です: {weight_decay}')
 
     # 固定数によらず同一シードにして、固定数間の比較を公平にする
-    seed = SEED + SUBJECT_INDEX[target]
+    seed = SEED
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
@@ -844,22 +861,22 @@ def run_fold(total, num_fixed, target, kept, epochs, teacher_importance, ranking
     # 学生モデルのglobal normalizationはターゲットを除くouter-trainだけで計算する。
     train_mean, train_std = None, None
     if normalize == 'global':
-        x_train_raw, _ = load_subjects(train_subjects, 'none')
+        x_train_raw, _ = load_sessions(train_sessions, 'none')
         train_mean = x_train_raw.mean(dim=0, keepdim=True)
         train_std = x_train_raw.std(dim=0, keepdim=True)
         del x_train_raw
 
     tag = f'[T{total}/F{num_fixed}/{target}]'
 
-    # --- 教師出力: このfoldの学習被験者だけで学習された教師のキャッシュ ---
+    # --- 教師出力: このfoldの学習セッションだけで学習された教師のキャッシュ ---
     # (キャッシュが無ければここで作る。--only-target 単体実行でも動くように)
     cache_path = build_teacher_cache(target, kept, teacher_importance, device, cache_dir,
                                      normalize)
     teacher_cache = np.load(cache_path)
 
-    # 教師の電極重要度: fold_const なら【学習被験者だけ】の平均を全サンプルに配る
+    # 教師の電極重要度: fold_const なら学習セッションだけの平均を全サンプルに配る
     if gate_teacher == 'fold_const':
-        imp_override = fold_constant_importance(teacher_cache, train_subjects)
+        imp_override = fold_constant_importance(teacher_cache, train_sessions)
         imp_dim = NUM_CHANNELS
     elif gate_teacher == 'per_sample':
         imp_override, imp_dim = None, NUM_CHANNELS
@@ -872,7 +889,7 @@ def run_fold(total, num_fixed, target, kept, epochs, teacher_importance, ranking
     #   重要度ランキング上位 num_fixed 本を固定電極 (常時ON) にし、
     #   残りの電極から Gate が (total - num_fixed) 本を動的に選ぶ。
     ranking, ranking_scores = resolve_ranking(
-        ranking_mode, teacher_importance, teacher_cache, train_subjects)
+        ranking_mode, teacher_importance, teacher_cache, train_sessions)
     fixed_names = ranking[:num_fixed]
     fixed_indices = [CHANNEL_NAMES.index(n) for n in fixed_names]
     target_var_electrodes = max(0, total - num_fixed)
@@ -885,7 +902,8 @@ def run_fold(total, num_fixed, target, kept, epochs, teacher_importance, ranking
     else:
         variable_indices = [i for i in range(NUM_CHANNELS) if i not in fixed_indices]
 
-    print(f"{tag} train {len(train_subjects)}名 {train_subjects} / test [{target}] "
+    print(f"{tag} train {len(train_sessions)}セッション / "
+          f"test {len(target_sessions)}セッション {target_sessions} "
           f"| fixed={fixed_names} | var_target={target_var_electrodes}"
           f"/{len(variable_indices)} | epochs={epochs} "
           f"| normalize={normalize} | class_weight={class_weight} "
@@ -917,11 +935,11 @@ def run_fold(total, num_fixed, target, kept, epochs, teacher_importance, ranking
         {'params': model.gate.parameters(), 'lr': learning_rate},
         {'params': model.classifier.parameters(), 'lr': learning_rate},
     ], weight_decay=weight_decay)
-    # クラス重みは【学習被験者のラベルだけ】から作る（ターゲットは見ない）
-    weights = class_weights(train_subjects, class_weight, device)
+    # クラス重みは学習セッションのラベルだけから作る（ターゲットは見ない）
+    weights = class_weights(train_sessions, class_weight, device)
     loss_fn = nn.CrossEntropyLoss(weight=weights)
 
-    train_loader = make_loader(train_subjects, shuffle=True, teacher_cache=teacher_cache,
+    train_loader = make_loader(train_sessions, shuffle=True, teacher_cache=teacher_cache,
                                normalize=normalize, imp_override=imp_override,
                                generator=generator, train_mean=train_mean,
                                train_std=train_std, batch_size=batch_size)
@@ -961,8 +979,8 @@ def run_fold(total, num_fixed, target, kept, epochs, teacher_importance, ranking
         print(f"    {tag} Epoch {ep+1:3d}/{epochs} | loss {curve_train_loss[-1]:.4f} "
               f"| acc {curve_train_acc[-1]:5.2f}% | usage {curve_usage[-1]:.1f}ch", flush=True)
 
-    # --- ターゲット被験者で最終評価 (1回だけ) ---
-    test_loader = make_loader([target], shuffle=False, teacher_cache=teacher_cache,
+    # --- ターゲットセッションで最終評価 (1回だけ) ---
+    test_loader = make_loader(target_sessions, shuffle=False, teacher_cache=teacher_cache,
                               normalize=normalize, imp_override=imp_override,
                               train_mean=train_mean, train_std=train_std,
                               batch_size=batch_size)
@@ -982,7 +1000,8 @@ def run_fold(total, num_fixed, target, kept, epochs, teacher_importance, ranking
               'n_variable_channels': len(variable_indices),
               'fixed_channels': fixed_names, 'ranking_mode': ranking_mode,
               'full_fix_mode': full_fix_mode,
-              'n_test': len(trues), 'train_subjects': train_subjects, 'epochs': epochs,
+              'n_test': len(trues), 'train_sessions': train_sessions,
+              'target_sessions': target_sessions, 'epochs': epochs,
               'teacher_importance': teacher_importance,
               'teacher_dir': CHEAT_SHEET_DIR, 'normalize': normalize,
               'class_weight': class_weight,
@@ -1054,7 +1073,7 @@ def summarize(fold_results, subset):
     sub = [fold_results[s] for s in subset if s in fold_results]
     if not sub:
         return None
-    out = {'n_subjects': len(sub), 'subjects': list(subset)}
+    out = {'n_sessions': len(sub), 'sessions': list(subset)}
     for key, _ in REPORT_METRICS:
         v = np.array([r[key] for r in sub], dtype=float)
         v = v[~np.isnan(v)]
@@ -1071,7 +1090,7 @@ def aggregate_fix(total, num_fixed, base_dir, manifest, verbose=True):
     if not files:
         return None
 
-    balanced = manifest['loso_target_subjects']
+    balanced = manifest['loso_target_sessions']
 
     fold_results, arrays = {}, {}
     for p in files:
@@ -1081,8 +1100,8 @@ def aggregate_fix(total, num_fixed, base_dir, manifest, verbose=True):
         r['balanced_acc'] = 100.0 * balanced_accuracy_score(arr['trues'], arr['preds'])
         fold_results[r['target']] = r
         arrays[r['target']] = arr
-    # 被験者IDは文字列なので辞書順ではなく SUBJECT_LIST の並びで揃える
-    targets = sorted(fold_results, key=lambda s: SUBJECT_INDEX.get(s, len(SUBJECT_LIST)))
+    # セッションIDは文字列なので辞書順ではなく SUBJECT_LIST の並びで揃える
+    targets = sorted(fold_results, key=lambda s: SESSION_INDEX.get(s, len(SUBJECT_LIST)))
     degenerate = [s for s in targets if s not in balanced]
 
     global_true = np.concatenate([arrays[t]['trues'] for t in targets]).tolist()
@@ -1167,7 +1186,7 @@ def aggregate_fix(total, num_fixed, base_dir, manifest, verbose=True):
                 "(Precision, Recall, F1 は macro 平均)\n")
         f.write(f"epochs : {fold_results[targets[0]].get('epochs')} (全fold固定)\n")
         f.write(f"ranking: {fold_results[targets[0]].get('ranking_mode')} "
-                f"(fold=学習被験者のみから作成 / global=全fold共通)\n")
+                f"(fold=学習セッションのみから作成 / global=全fold共通)\n")
         f.write(f"labeling: {manifest['labeling_rule']}\n")
         f.write("\n===== Hyperparameters =====\n")
         f.write("  lr_gate:           foldごとのOptuna learning_rate\n")
@@ -1195,10 +1214,10 @@ def aggregate_fix(total, num_fixed, base_dir, manifest, verbose=True):
                 f"(可変チャネル {fold_results[targets[0]].get('n_variable_channels')} 本から選ぶ)\n")
         f.write(f"  full_fix_mode:     {fold_results[targets[0]].get('full_fix_mode')}\n\n")
         for title, summ in [('全ターゲット', summary_all),
-                            ('両クラスを持つ被験者のみ', summary_balanced)]:
+                            ('両クラスを持つセッションのみ', summary_balanced)]:
             if summ is None:
                 continue
-            f.write(f"----- {title} (n={summ['n_subjects']}) -----\n")
+            f.write(f"----- {title} (n={summ['n_sessions']}) -----\n")
             for key, label in REPORT_METRICS:
                 v = summ[key]
                 if v is None:
@@ -1208,7 +1227,7 @@ def aggregate_fix(total, num_fixed, base_dir, manifest, verbose=True):
                 f.write(f"  {label}: {v['mean']:{fmt}}{unit} ± {v['std']:{fmt}}{unit}\n")
             sel = summ['avg_selected_electrodes']
             f.write(f"  Electrodes: {sel['mean']:.2f} ± {sel['std']:.2f} ch (目標 {total}ch)\n\n")
-        f.write("Per subject:\n")
+        f.write("Per session:\n")
         for s in targets:
             r = fold_results[s]
             mark = '' if s in balanced else '  (degenerate)'
@@ -1249,7 +1268,7 @@ def aggregate_fix(total, num_fixed, base_dir, manifest, verbose=True):
                                     for i in range(NUM_CHANNELS)},
         'fixed_channels_per_fold': {str(s): fold_results[s]['fixed_channels']
                                     for s in targets},
-        'per_subject': {str(s): fold_results[s] for s in targets},
+        'per_session': {str(s): fold_results[s] for s in targets},
     }
     with open(os.path.join(fix_dir, 'loso_results.json'), 'w') as f:
         json.dump(out, f, indent=2, ensure_ascii=False)
@@ -1258,10 +1277,10 @@ def aggregate_fix(total, num_fixed, base_dir, manifest, verbose=True):
         print(f"\n===== Total {total}ch / Fixed {num_fixed}ch "
               f"({ratio*100:.0f}% fixed, {len(targets)} folds) =====")
         for title, summ in [('全ターゲット', summary_all),
-                            ('両クラスを持つ被験者のみ', summary_balanced)]:
+                            ('両クラスを持つセッションのみ', summary_balanced)]:
             if summ is None:
                 continue
-            print(f" {title} (n={summ['n_subjects']}名)")
+            print(f" {title} (n={summ['n_sessions']}セッション)")
             for key, label in REPORT_METRICS:
                 v = summ[key]
                 if v is None:
@@ -1306,7 +1325,7 @@ def aggregate_all(total, base_dir, manifest, fix_counts):
             'all_precision_mean': g(sa, 'macro_precision'),
             'all_recall_mean': g(sa, 'macro_recall'),
             'all_f1_mean': g(sa, 'macro_f1'), 'all_f1_std': g(sa, 'macro_f1', 'std'),
-            # --- 両クラスを持つ被験者のみ (論文の主指標) ---
+            # --- 両クラスを持つセッションのみ (論文の主指標) ---
             'bal_acc_mean': g(sb, 'acc'), 'bal_acc_std': g(sb, 'acc', 'std'),
             'bal_balanced_acc_mean': g(sb, 'balanced_acc'),
             'bal_balanced_acc_std': g(sb, 'balanced_acc', 'std'),
@@ -1341,7 +1360,7 @@ def aggregate_all(total, base_dir, manifest, fix_counts):
               f"{r['all_acc_mean']:>7.2f} | {r['all_f1_mean']:>7.4f} | "
               f"{r['pooled_acc']:>7.2f} | {r['n_folds']}")
 
-    # 論文の主指標である「両クラスを持つ被験者のみ」の macro F1 で最良の固定数を決める
+    # 論文の主指標である「両クラスを持つセッションのみ」の macro F1 で最良の固定数を決める
     valid = [r for r in rows if not np.isnan(r['bal_f1_mean'])]
     if valid:
         best = max(valid, key=lambda x: x['bal_f1_mean'])
@@ -1380,9 +1399,9 @@ def aggregate_all(total, base_dir, manifest, fix_counts):
                    'cheat_sheet_dir': CHEAT_SHEET_DIR,
                    'n_total_electrodes': total,
                    'labeling_rule': manifest['labeling_rule'],
-                   'excluded_subjects': manifest['excluded_subjects'],
-                   'kept_subjects': manifest['kept_subjects'],
-                   'balanced_targets': manifest['loso_target_subjects'],
+                   'excluded_sessions': manifest['excluded_sessions'],
+                   'kept_sessions': manifest['kept_sessions'],
+                   'balanced_targets': manifest['loso_target_sessions'],
                    'fix_counts': [d['n_fixed_electrodes'] for d in details],
                    'per_fix_count': details}, f, indent=2, ensure_ascii=False)
     print(f"Summary plot saved to: {plot_path}")
@@ -1410,7 +1429,7 @@ def main():
                     help="all: 読み込めた全セッションをターゲットにする(既定) / "
                          "balanced: 少数クラスが2%%以上のセッションのみ")
     ap.add_argument('--limit-folds', type=int, default=None,
-                    help='先頭N名だけ回す（動作確認用）')
+                    help='先頭Nセッションだけ回す（動作確認用）')
     ap.add_argument('--teacher-importance', choices=['col', 'cls'], default='col',
                     help='Gateに渡す教師の電極重要度。col=electrode_attentionの列平均(既定) / '
                          'cls=CLS行attention(比較用)')
@@ -1428,7 +1447,7 @@ def main():
     ap.add_argument('--gate-teacher', choices=['fold_const', 'per_sample', 'none'],
                     default=GATE_TEACHER,
                     help=f'教師の電極重要度の入れ方（既定 {GATE_TEACHER}）。'
-                         'fold_const: 学習被験者平均をfold内の全サンプルに配る / '
+                         'fold_const: 学習セッション平均をfold内の全サンプルに配る / '
                          'per_sample: サンプルごと（旧挙動。マスクの中身がこれになる）/ '
                          'none: Gate 入力から外す')
     ap.add_argument('--gate-hints', action='store_true', default=GATE_HINTS,
@@ -1446,7 +1465,7 @@ def main():
                          'static=Gateを使わず上位TOTAL本だけを使う静的ベースライン(既定) / '
                          'gate=Gateを残して目標0本にする')
     ap.add_argument('--ranking', choices=['fold', 'global'], default='fold',
-                    help='固定電極の選定順。fold=そのfoldの学習被験者だけから作る'
+                    help='固定電極の選定順。fold=そのfoldの学習セッションだけから作る'
                          '(リークなし、既定) / global=全fold共通ランキング')
     ap.add_argument('--jobs', type=int, default=None,
                     help='同時実行プロセス数（既定 GPU数×%d）' % PROCESSES_PER_GPU)
@@ -1455,7 +1474,7 @@ def main():
     ap.add_argument('--save-path', type=str, default=RESEARCH_BASE_DIR)
     ap.add_argument('--teacher-cache-dir', type=str, default=TEACHER_CACHE_DIR,
                     help='教師出力キャッシュの置き場 '
-                         '(既定はOptuna電極数スイープのキャッシュを共有)')
+                         '(既定はresearchbestnumのセッションLOSOキャッシュを共有)')
     args = ap.parse_args()
 
     if not (1 <= args.total <= NUM_CHANNELS):
@@ -1466,8 +1485,8 @@ def main():
 
     # SEED-VIG には manifest ファイルが無いので、ラベル分布から実行時に組み立てる。
     manifest = build_manifest()
-    kept = manifest['kept_subjects']              # 読み込めた全セッション
-    balanced = manifest['loso_target_subjects']   # 両クラスを十分持つセッション
+    kept = manifest['kept_sessions']              # 読み込めた全セッション
+    balanced = manifest['loso_target_sessions']   # 両クラスを十分持つセッション
     if not kept:
         raise SystemExit(f"データが見つかりません: {DATA_DIR}\n"
                          f"preprocessing_VIG/label_2class_subject_wise.py を先に実行してください")
@@ -1502,11 +1521,11 @@ def main():
     print(f"データ    : {DATA_DIR}")
     print(f"Optuna教師: {CHEAT_SHEET_DIR} (foldごとのモデル・最良params・標準化を使用)")
     print(f"ラベル    : {manifest['labeling_rule']}")
-    print(f"欠損      : {manifest['excluded_subjects']}")
-    print(f"学習可    : {len(kept)}名 {kept}")
-    print(f"ターゲット: {len(targets)}名 {targets}")
+    print(f"欠損      : {manifest['excluded_sessions']}")
+    print(f"学習可    : {len(kept)}セッション")
+    print(f"ターゲット: {len(targets)}セッション")
     if degenerate:
-        print(f"  ※ うち{len(degenerate)}名 {degenerate} は少数クラスが極端に少なく、"
+        print(f"  ※ うち{len(degenerate)}セッションは少数クラスが極端に少なく、"
               f"macro Precision/Recall/F1が退化する。集計は両方を出す")
     print(f"総電極数  : {args.total}")
     print(f"固定電極数: {fix_counts} (残り {args.total}-F 本を動的選定)")
@@ -1521,7 +1540,7 @@ def main():
     print(f"F=TOTAL時 : {args.full_fix} "
           f"({'Gateなし・上位TOTAL本のみ' if args.full_fix == 'static' else 'Gateあり・目標0本'})")
     print(f"固定順    : {args.ranking}"
-          + ("  (foldの学習被験者だけから作成)" if args.ranking == 'fold'
+          + ("  (foldの学習セッションだけから作成)" if args.ranking == 'fold'
              else f"  {GLOBAL_IMPORTANCE_RANKINGS[args.teacher_importance]}"))
 
     # 事前に教師モデルの有無を確認する（全fold回してから気づくのを避ける）
@@ -1530,7 +1549,7 @@ def main():
     if missing:
         print(f"\n【エラー】教師モデルが見つからないセッション: {missing}")
         print(f"  {CHEAT_SHEET_DIR} に model_target_<session>.pth が必要です。")
-        print("  先に optunar_LOSO/LOSO_VIG_optunar.py を実行してください。")
+        print("  先に optunar_LOSO/LOSO_VIG_optunar_same_settion.py を実行してください。")
         sys.exit(1)
 
     try:

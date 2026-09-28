@@ -1,10 +1,11 @@
-"""SEED-VIG 2クラス分類の outer LOSO + inner HoldOut + Optuna 実験。
+"""全20名を学習候補にする2クラス outer LOSO + inner HoldOut + Optuna実験。
 
-outer LOSO の target セッションは最終評価にだけ使用する。各 outer fold の学習セッションを
-さらにセッション単位の inner train/validation に1回だけ分け、Optuna でハイパー
-パラメータを選択する。既定では全23セッションを outer target にし、各foldを
-inner train 19セッション / validation 3セッション / outer test 1セッションとする。入力標準化の
-mean/std は inner train だけから計算し、validation/test に同じ統計量を適用する。
+outer testは、両クラスを一定以上持つ11名にSub3・Sub20を加えた13名から選ぶ。
+inner validationも同じ13名からouter targetを除いて選ぶ。
+各foldではouter target 1名とvalidation 3名を20名から隔離し、残り16名を
+inner trainにする。Sub3・Sub20以外の単一クラスまたは極端に偏った7名は、
+学習データ提供元としてのみ利用する。入力標準化のmean/stdはinner trainだけから
+計算し、validation/testへ同じ統計量を適用する。
 
 処理順:
   outer target隔離 -> inner train/validation固定分割 -> Optuna
@@ -41,44 +42,26 @@ from torch.utils.data import DataLoader, TensorDataset
 # プロジェクトルートへのパスを追加
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # モデルとして gcn_select_net をimport
-from select_channel.select_net_class_optunar import gcn_select_net
+from select_net.select_net_class_optunar_same import gcn_select_net
 
 warnings.filterwarnings("ignore")
 
 # =========================================================================
 # 設定
 # =========================================================================
-DATA_DIR = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_analysis_SEED-VIG/'
-            'processedData/subject_wise_2class')
-SAVE_PATH = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_analysis_SEED-VIG/optunar_LOSO/'
-             'LOSO_GCN_Optuna_InnerHoldout3_SEEDVIG/')
+DATA_DIR = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_VLA/processdData/'
+            'subject_wise_2class_allsubject')
+SAVE_PATH = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_VLA/optunar_LOSO/'
+             'LOSO_GCN_Optuna_All20Train_best_13people_same/')
 
 NUM_CLASSES = 2
 CLASS_NAMES = ['Awake', 'Fatigue']
 
-# SEED-VIG の chn 配列から CPZ を除いた17ch
-CHANNEL_NAMES = ['FT7', 'FT8', 'T7', 'T8', 'TP7', 'TP8',
-                 'CP1', 'CP2', 'P1', 'PZ', 'P2',
-                 'PO3', 'POZ', 'PO4', 'O1', 'OZ', 'O2']
+# 電極一覧 (18ch)
+CHANNEL_NAMES = ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8',
+                 'T3', 'C3', 'Cz', 'C4', 'T4',
+                 'T5', 'P3', 'T6', 'P4', 'O1', 'O2']
 NUM_CHANNELS = len(CHANNEL_NAMES)
-
-# LOSO対象の全23セッション。被験者番号だけではなく、計測セッションを
-# 1つのdomainとして扱う（被験者4と5はそれぞれ2セッションを含む）。
-SUBJECT_LIST = [
-    '1_20151124_noon_2', '2_20151106_noon', '3_20151024_noon',
-    '4_20151105_noon', '4_20151107_noon', '5_20141108_noon',
-    '5_20151012_night', '6_20151121_noon', '7_20151015_night',
-    '8_20151022_noon', '9_20151017_night', '10_20151125_noon',
-    '11_20151024_night', '12_20150928_noon', '13_20150929_noon',
-    '14_20151014_night', '15_20151126_night', '16_20151128_night',
-    '17_20150925_noon', '18_20150926_noon', '19_20151114_noon',
-    '20_20151129_night', '21_20151016_noon',
-]
-SUBJECT_INDEX = {subject: index for index, subject in enumerate(SUBJECT_LIST)}
-
-# 単一クラスのセッションは全foldの学習には残す一方、balanced指定時の
-# outer targetから除く。only_LOSO_vig_2.py と同じ判定基準。
-MIN_MINORITY_RATIO = 0.02
 
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-4
@@ -90,6 +73,14 @@ N_TRIALS = 40
 INNER_VAL_SUBJECTS = 3
 EARLY_STOP_PATIENCE = 20
 PRUNER_WARMUP_EPOCHS = 10
+
+# manifestの通常target 11名にSub3・Sub20を加え、outer testとinner validationの
+# 両方で共通の13名候補として使用する。
+EXTRA_TARGET_SUBJECTS = (3, 20)
+
+# 0.5秒×16 binに対し、long=kernel 5/dilation 2 (RF=9),
+# all=kernel 7/dilation 2 (RF=13) を使用する。
+TEMPORAL_CNN_VARIANT = 'tuab'
 
 # multi-GPU scheduler defaults. workerごとのメモリ予約値とGPUに残す安全余裕を
 # 満たす範囲で、1 GPUにつき最大3 outer fold workerを起動する。
@@ -128,71 +119,28 @@ REPORT_METRICS = [('acc', 'Accuracy '),
                   ('kappa', 'Kappa    ')]
 PCT_METRICS = {'acc', 'balanced_acc_pct'}
 
-# 頭部トポマップ上のおおよその位置 (SEED-VIG 17ch)
+# 描画用の電極座標 (VLA 18ch)
 COORDS = {
-    'FT7': (-0.82, 0.42), 'FT8': (0.82, 0.42),
-    'T7': (-0.95, 0.0), 'T8': (0.95, 0.0),
-    'TP7': (-0.85, -0.35), 'TP8': (0.85, -0.35),
-    'CP1': (-0.25, -0.30), 'CP2': (0.25, -0.30),
-    'P1': (-0.26, -0.58), 'PZ': (0.0, -0.58), 'P2': (0.26, -0.58),
-    'PO3': (-0.32, -0.78), 'POZ': (0.0, -0.78), 'PO4': (0.32, -0.78),
-    'O1': (-0.27, -0.93), 'OZ': (0.0, -0.95), 'O2': (0.27, -0.93),
+    'Fp1': (-0.3, 0.9), 'Fp2': (0.3, 0.9),
+    'F7': (-0.8, 0.6), 'F3': (-0.4, 0.6), 'Fz': (0, 0.6), 'F4': (0.4, 0.6), 'F8': (0.8, 0.6),
+    'T3': (-0.9, 0.0), 'C3': (-0.5, 0.0), 'Cz': (0, 0.0), 'C4': (0.5, 0.0), 'T4': (0.9, 0.0),
+    'T5': (-0.8, -0.6), 'P3': (-0.4, -0.6), 'T6': (0.8, -0.6), 'P4': (0.4, -0.6),
+    'O1': (-0.3, -0.9), 'O2': (0.3, -0.9),
 }
 
 # =========================================================================
 # データ処理
 # =========================================================================
-def build_manifest():
-    """配置済みSEED-VIGデータを検査し、実行対象を決定する。"""
-    kept, balanced, missing, counts = [], [], [], {}
-    for subject in SUBJECT_LIST:
-        eeg_path = os.path.join(DATA_DIR, f'eeg_{subject}.npy')
-        label_path = os.path.join(DATA_DIR, f'label_{subject}.npy')
-        if not (os.path.exists(eeg_path) and os.path.exists(label_path)):
-            missing.append(subject)
-            continue
-
-        y = np.load(label_path, mmap_mode='r')
-        n_awake = int((y == 0).sum())
-        n_fatigue = int((y == 1).sum())
-        counts[subject] = {
-            'n': int(len(y)),
-            'n_awake': n_awake,
-            'n_fatigue': n_fatigue,
-        }
-        kept.append(subject)
-        if min(n_awake, n_fatigue) >= MIN_MINORITY_RATIO * len(y):
-            balanced.append(subject)
-
-    return {
-        'kept_subjects': kept,
-        'loso_target_subjects': balanced,
-        'labeling_rule': 'PERCLOS < 0.35 -> 0 (Awake), >= 0.35 -> 1 (Fatigue)',
-        'excluded_subjects': missing,
-        'class_counts': counts,
-    }
-
-
 def load_subjects(subject_ids, return_sid=False):
     """被験者ごとの個別標準化やマスク処理を行わず、生データをそのまま結合する"""
     xs, ys, sids = [], [], []
     for s in subject_ids:
-        x = np.load(os.path.join(DATA_DIR, f'eeg_{s}.npy')).astype(np.float32)
-        y = np.load(os.path.join(DATA_DIR, f'label_{s}.npy'))
-
-        if x.ndim != 4 or x.shape[-1] != NUM_CHANNELS:
-            raise ValueError(
-                f'{s}: EEG shapeは[N, time, freq, {NUM_CHANNELS}]を期待しますが、'
-                f'{x.shape}でした')
-        if len(x) != len(y):
-            raise ValueError(f'{s}: EEG={len(x)}件、label={len(y)}件で長さが不一致です')
-        invalid_labels = np.setdiff1d(np.unique(y), np.arange(NUM_CLASSES))
-        if invalid_labels.size:
-            raise ValueError(f'{s}: 不正なラベルがあります: {invalid_labels.tolist()}')
+        x = np.load(os.path.join(DATA_DIR, f'paper_eeg_{s}.npy')).astype(np.float32)
+        y = np.load(os.path.join(DATA_DIR, f'paper_label_{s}.npy'))
             
         xs.append(x)
         ys.append(y)
-        sids.append(np.full(len(y), SUBJECT_INDEX[s], dtype=np.int64))
+        sids.append(np.full(len(y), s, dtype=np.int64))
         
     x = torch.FloatTensor(np.concatenate(xs, axis=0))
     y = torch.LongTensor(np.concatenate(ys, axis=0).astype(np.int64))
@@ -223,17 +171,6 @@ def make_loader(subject_ids, shuffle, batch_size=BATCH_SIZE, generator=None,
 
 
 # =========================================================================
-# Attention 関連
-# =========================================================================
-def cls_row_importance(attention_weights):
-    """CLS行 attention から電極重要度を取る"""
-    rows = []
-    for layer in attention_weights:
-        a = torch.stack(layer)                # [H, B, 18, 18] (CLS + 17ch)
-        rows.append(a.mean(dim=0)[:, 0, 1:])  # ヘッド平均 -> CLS行 -> CLS列を除去
-    return torch.stack(rows).mean(dim=0)      # 層平均 -> [B, 17]
-
-# =========================================================================
 # 学習・推論・評価関連の関数
 # =========================================================================
 @torch.no_grad()
@@ -245,7 +182,6 @@ def evaluate(model, loader, device, loss_fn, collect_attention=False):
     n_seen = 0
     sum_gat = torch.zeros(NUM_CHANNELS, NUM_CHANNELS)
     sum_col = torch.zeros(NUM_CHANNELS)
-    sum_cls = torch.zeros(NUM_CHANNELS)
 
     for x, y in loader:
         if x.size(0) == 0:
@@ -253,7 +189,7 @@ def evaluate(model, loader, device, loss_fn, collect_attention=False):
         x, y = x.to(device), y.to(device).view(-1)
         
         # gcn_select_net は logits, attn_w, elec_attn, gat_attn を返す
-        logits, attn_w, elec_attn, gat_attn = model(x)
+        logits, _, elec_attn, gat_attn = model(x)
         total_loss += loss_fn(logits, y).item()
         n_batch += 1
 
@@ -264,11 +200,11 @@ def evaluate(model, loader, device, loss_fn, collect_attention=False):
 
         if collect_attention:
             n_seen += x.size(0)
-            # gat_attn: [B, heads, 17, 17] -> ヘッド平均
+            # gat_attn: [B, heads, 18, 18] -> ヘッド平均
             sum_gat += gat_attn.mean(dim=1).sum(dim=0).detach().cpu()
-            # elec_attn: [layers, B, 19] -> 層平均 -> CLS除去
+            # elec_attn: 各query行を平均したAttentionの
+            # [layers, B, 19] -> 層平均 -> CLS列を除去
             sum_col += elec_attn.mean(dim=0)[:, 1:].sum(dim=0).detach().cpu()
-            sum_cls += cls_row_importance(attn_w).sum(dim=0).detach().cpu()
 
     labels = list(range(NUM_CLASSES))
     
@@ -302,8 +238,7 @@ def evaluate(model, loader, device, loss_fn, collect_attention=False):
     attn = None
     if collect_attention and n_seen > 0:
         attn = {'gat': (sum_gat / n_seen).numpy(),
-                'col': (sum_col / n_seen).numpy(),
-                'cls': (sum_cls / n_seen).numpy()}
+                'col': (sum_col / n_seen).numpy()}
                 
     return metrics, trues, preds, probs, attn
 
@@ -430,7 +365,10 @@ def suggest_params(trial):
 def build_model(params, device):
     params = merge_params(params)
     model_kwargs = {key: params[key] for key in MODEL_PARAM_KEYS}
-    return gcn_select_net(num_classes=NUM_CLASSES, **model_kwargs).to(device)
+    return gcn_select_net(
+        num_classes=NUM_CLASSES,
+        temporal_variant=TEMPORAL_CNN_VARIANT,
+        **model_kwargs).to(device)
 
 
 def make_loss_fn(train_subjects, device):
@@ -555,29 +493,34 @@ def train_model(train_subjects, epochs, device, seed, params, train_mean, train_
     }
 
 
-def make_inner_holdout(target, subjects, n_validation):
-    """outer targetの次のセッションから循環的に、固定validation集合を作る。
+def make_inner_holdout(target, all_subjects, validation_pool, n_validation):
+    """target候補13名からvalidationを選び、残りの全被験者をtrainにする。
 
-    全outer foldを通じて各セッションがほぼ同じ回数validationに入り、分割はtrialや
-    ハイパーパラメータに依存しない。23セッション・validation 3件なら各foldは
-    inner train 19件 / validation 3件 / outer test 1件となる。
+    validationは適格被験者順でouter targetより後の被験者から循環的に選択する。
+    分割はtrialやハイパーパラメータに依存しない。全20名・validation 3名なら
+    各foldはinner train 16名、validation 3名、outer test 1名となる。
     """
-    # 文字列の辞書順（1, 10, 11, ...）にはせず、SUBJECT_LIST由来の順序を保つ。
-    ordered = list(dict.fromkeys(subjects))
-    if target not in ordered:
-        raise ValueError(f'target {target} がsubjectsに含まれていません')
-    candidates = len(ordered) - 1
+    all_ordered = sorted(dict.fromkeys(all_subjects))
+    validation_ordered = sorted(dict.fromkeys(validation_pool))
+    if target not in all_ordered:
+        raise ValueError(f'target {target} がall_subjectsに含まれていません')
+    unknown = [s for s in validation_ordered if s not in all_ordered]
+    if unknown:
+        raise ValueError(f'validation候補がall_subjectsに含まれていません: {unknown}')
+
+    candidates = len(validation_ordered) - int(target in validation_ordered)
     if not 1 <= n_validation < candidates:
         raise ValueError(
-            f'validationセッション数は1以上outer trainセッション数未満にしてください: '
-            f'n_validation={n_validation}, outer_train={candidates}')
+            f'validation人数は1以上、利用可能な候補者数未満にしてください: '
+            f'n_validation={n_validation}, eligible_candidates={candidates}')
 
-    target_index = ordered.index(target)
-    rotated = ordered[target_index + 1:] + ordered[:target_index]
+    # targetより大きい最初の候補から始め、末尾に達したら先頭へ循環する。
+    rotated = ([s for s in validation_ordered if s > target]
+               + [s for s in validation_ordered if s < target])
     validation_subjects = rotated[:n_validation]
     validation_set = set(validation_subjects)
     inner_train_subjects = [
-        subject for subject in ordered
+        subject for subject in all_ordered
         if subject != target and subject not in validation_set
     ]
     return inner_train_subjects, validation_subjects
@@ -625,8 +568,10 @@ def optimize_fold(target, inner_train, validation_subjects, args, device,
 
     db_path = os.path.abspath(os.path.join(
         save_path, f'optuna_holdout_target_{target}.db'))
-    study_name = f'seed_vig_outer_loso_inner_holdout_target_{target}_v3'
-    sampler = optuna.samplers.TPESampler(seed=SEED + SUBJECT_INDEX[target])
+    study_name = (
+        f'seed_vla_all20_eligible13_target_{target}_'
+        f'{TEMPORAL_CNN_VARIANT}_v1')
+    sampler = optuna.samplers.TPESampler(seed=SEED)
     pruner = optuna.pruners.MedianPruner(
         n_startup_trials=args.pruner_startup,
         n_warmup_steps=args.pruner_warmup)
@@ -636,8 +581,12 @@ def optimize_fold(target, inner_train, validation_subjects, args, device,
         sampler=sampler, pruner=pruner)
 
     study_config = {
-        'pipeline_version': 3,
-        'dataset': 'SEED-VIG subject_wise_2class',
+        'pipeline_version': 5,
+        'temporal_cnn_variant': TEMPORAL_CNN_VARIANT,
+        'temporal_cnn_long': 'kernel=(5,1), dilation=(2,1), RF=9',
+        'temporal_cnn_all': 'kernel=(7,1), dilation=(2,1), RF=13',
+        'training_pool': 'all 20 subjects excluding outer test and inner validation',
+        'validation_pool': '13 outer-target subjects',
         'target': target,
         'inner_train_subjects': inner_train,
         'validation_subjects': validation_subjects,
@@ -692,18 +641,18 @@ def optimize_fold(target, inner_train, validation_subjects, args, device,
     }
     return best
 
-def run_fold(target, kept, args, device, save_path):
-    outer_train_subjects = [s for s in kept if s != target]
+def run_fold(target, all_subjects, validation_pool, args, device, save_path):
+    outer_train_subjects = [s for s in all_subjects if s != target]
     inner_train, validation_subjects = make_inner_holdout(
-        target, kept, args.val_subjects)
+        target, all_subjects, validation_pool, args.val_subjects)
     inner_mean, inner_std = fit_standardizer(inner_train)
 
     print("=" * 70)
     print(f" OUTER LOSO + INNER HOLDOUT  ->  TARGET SUBJECT {target}")
     print("=" * 70)
-    print(f"  inner train {len(inner_train)}セッション: {inner_train}")
-    print(f"  validation  {len(validation_subjects)}セッション: {validation_subjects}")
-    print(f"  outer test  1セッション: [{target}]", flush=True)
+    print(f"  inner train {len(inner_train)}名: {inner_train}")
+    print(f"  validation  {len(validation_subjects)}名: {validation_subjects}")
+    print(f"  outer test  1名: [{target}]", flush=True)
 
     if args.no_optuna:
         best = {
@@ -721,17 +670,19 @@ def run_fold(target, kept, args, device, save_path):
 
     # Optuna選択内容を先に保存し、最終再学習後に実測best epoch等で更新する。
     with open(os.path.join(save_path, f'inner_target_{target}.json'), 'w') as f:
-        json.dump({'target': target, **best}, f, indent=2,
+        json.dump({'target': target,
+                   'temporal_cnn_variant': TEMPORAL_CNN_VARIANT,
+                   **best}, f, indent=2,
                   ensure_ascii=False)
 
     # TUAB版と同様、同じinner train/validationで最初から再学習し、
     # validation複合スコアが最大のcheckpointをouter testへ適用する。
     np.savez(os.path.join(save_path, f'standardizer_target_{target}.npz'),
              mean=inner_mean.numpy(), std=inner_std.numpy(),
-             train_subjects=np.asarray(inner_train, dtype=str),
+             train_subjects=np.asarray(inner_train, dtype=np.int64),
              validation_subjects=np.asarray(
-                 validation_subjects, dtype=str),
-             target=np.asarray([target], dtype=str))
+                 validation_subjects, dtype=np.int64),
+             target=np.asarray([target], dtype=np.int64))
 
     print(f"  [final train] train={len(inner_train)}, "
           f"validation={len(validation_subjects)}, "
@@ -750,7 +701,9 @@ def run_fold(target, kept, args, device, save_path):
     best['final_stopped_epoch'] = int(final['stopped_epoch'])
 
     with open(os.path.join(save_path, f'inner_target_{target}.json'), 'w') as f:
-        json.dump({'target': target, **best}, f, indent=2,
+        json.dump({'target': target,
+                   'temporal_cnn_variant': TEMPORAL_CNN_VARIANT,
+                   **best}, f, indent=2,
                   ensure_ascii=False)
 
     torch.save(model.state_dict(),
@@ -788,6 +741,7 @@ def eval_target(model, target, best, train_subjects, validation_subjects,
               'train_subjects': train_subjects,
               'validation_subjects': validation_subjects,
               'outer_train_subjects': outer_train_subjects,
+              'temporal_cnn_variant': TEMPORAL_CNN_VARIANT,
               'epochs': best['epoch'], 'params': params,
               'optuna_selected_epoch': best.get('optuna_selected_epoch'),
               'final_validation_score': best.get('final_validation_score'),
@@ -802,13 +756,15 @@ def eval_target(model, target, best, train_subjects, validation_subjects,
     np.savez(os.path.join(save_path, f'fold_target_{target}.npz'),
              trues=np.array(trues), preds=np.array(preds),
              probs=np.array(probs, dtype=np.float32),
-             gat=attn['gat'], col=attn['col'], cls=attn['cls'],
+             gat=attn['gat'], col=attn['col'],
              curve_train_loss=np.array(curve_train_loss),
              curve_val_score=np.array(curve_val_score))
 
     tag = f'target_{target}'
     plot_attention_matrix(attn['gat'], tag, tm['acc'], save_path)
-    plot_importance_bar(attn['cls'], tag, f"CLS-row, Acc {tm['acc']:.2f}%", save_path)
+    plot_importance_bar(
+        attn['col'], tag,
+        f"all-query mean, Acc {tm['acc']:.2f}%", save_path)
     plot_confusion(trues, preds, tag,
                    f'Target Subject {target} (Acc: {tm["acc"]:.2f}%)', save_path)
     return result
@@ -848,9 +804,20 @@ def print_prior_bias_diagnosis(fold_results, targets, arrays):
             'mean_pred_fatigue_rate': float(pred_rate.mean())}
 
 
+def experiment_subject_pools(manifest):
+    """manifestを変更せず、この実験固有の被験者poolを返す。"""
+    all_subjects = list(manifest['all_subjects'])
+    target_subjects = sorted(dict.fromkeys(
+        list(manifest['loso_target_subjects']) + list(EXTRA_TARGET_SUBJECTS)))
+    validation_pool = list(target_subjects)
+    donor_only_subjects = [s for s in all_subjects if s not in target_subjects]
+    return target_subjects, validation_pool, donor_only_subjects
+
+
 def aggregate(save_path, manifest):
-    kept = manifest['kept_subjects']
-    balanced = manifest['loso_target_subjects']
+    all_subjects = manifest['all_subjects']
+    expected_targets, validation_pool, donor_only_subjects = (
+        experiment_subject_pools(manifest))
 
     files = sorted(glob.glob(os.path.join(save_path, 'fold_target_*.json')))
     if not files:
@@ -862,10 +829,12 @@ def aggregate(save_path, manifest):
         t = r['target']
         fold_results[t] = r
         arrays[t] = np.load(p.replace('.json', '.npz'))
-    targets = sorted(
-        fold_results,
-        key=lambda subject: SUBJECT_INDEX.get(subject, len(SUBJECT_LIST)))
-    degenerate = [s for s in targets if s not in balanced]
+    targets = sorted(fold_results)
+    unexpected_targets = [s for s in targets if s not in expected_targets]
+    if unexpected_targets:
+        raise RuntimeError(
+            'test適格被験者以外のfold結果が保存先に混在しています: '
+            f'{unexpected_targets}')
 
     global_true = np.concatenate([arrays[t]['trues'] for t in targets]).tolist()
     global_pred = np.concatenate([arrays[t]['preds'] for t in targets]).tolist()
@@ -882,7 +851,6 @@ def aggregate(save_path, manifest):
         return out
 
     summary_all = summarize(targets)
-    summary_balanced = summarize([s for s in targets if s in balanced])
 
     report = classification_report(
         global_true, global_pred, labels=list(range(NUM_CLASSES)),
@@ -904,7 +872,7 @@ def aggregate(save_path, manifest):
     def print_summary(title, summ):
         if summ is None:
             return
-        print(f"\n {title} (n={summ['n_subjects']}セッション)")
+        print(f"\n {title} (n={summ['n_subjects']}名)")
         for key, label in REPORT_METRICS:
             v = summ[key]
             if v is None:
@@ -919,26 +887,24 @@ def aggregate(save_path, manifest):
     validation_subjects_per_fold = {
         s: fold_results[s].get('validation_subjects', []) for s in targets
     }
-    print(f" OUTER LOSO + INNER HOLDOUT RESULTS ({len(targets)}/{len(kept)} folds)")
+    print(f" OUTER LOSO + INNER HOLDOUT RESULTS "
+          f"({len(targets)}/{len(expected_targets)} folds)")
     print(f" selected epochs {selected_epochs}")
     print("=" * 70)
-    print_summary('【全ターゲット】', summary_all)
-    if degenerate:
-        print_summary('【両クラスを持つセッションのみ】', summary_balanced)
+    print_summary('【test適格被験者】', summary_all)
 
-    print("\n セッション別:")
+    print("\n 被験者別:")
     for s in targets:
         r = fold_results[s]
-        mark = '' if s in balanced else '  ※退化'
         true_rate = r['n_class1_true'] / max(r['n_test'], 1)
         pred_rate = r.get('pred_fatigue_rate')
         if pred_rate is None:
             pred_rate = float(arrays[s]['preds'].mean())
-        print(f"  {s:<20s} n={r['n_test']:<5d} (覚醒{r['n_class0_true']:4d}/疲労{r['n_class1_true']:4d})"
+        print(f"  Sub{s:<3d} n={r['n_test']:<5d} (覚醒{r['n_class0_true']:4d}/疲労{r['n_class1_true']:4d})"
               f"  疲労率 真{true_rate:.3f}/予{pred_rate:.3f}"
               f"  Acc {r['acc']:6.2f}%  BACC {r['balanced_acc_pct']:6.2f}%"
               f"  Prec {r['macro_precision']:.4f}"
-              f"  Rec {r['macro_recall']:.4f}  F1 {r['macro_f1']:.4f}  Kappa {r['kappa']:.4f}{mark}")
+              f"  Rec {r['macro_recall']:.4f}  F1 {r['macro_f1']:.4f}  Kappa {r['kappa']:.4f}")
 
     print_prior_bias_diagnosis(fold_results, targets, arrays)
     print("\n===== Pooled Classification Report =====")
@@ -950,33 +916,31 @@ def aggregate(save_path, manifest):
 
     # --- 電極重要度の集約 ---
     imp_col = np.stack([arrays[t]['col'] for t in targets])
-    imp_cls = np.stack([arrays[t]['cls'] for t in targets])
     gat_mats = np.stack([arrays[t]['gat'] for t in targets])
     np.save(os.path.join(save_path, 'importance_colmean_per_fold.npy'), imp_col)
-    np.save(os.path.join(save_path, 'importance_clsrow_per_fold.npy'), imp_cls)
     np.save(os.path.join(save_path, 'gat_attention_per_fold.npy'), gat_mats)
     np.save(os.path.join(save_path, 'fold_order.npy'), np.array(targets))
 
     ranking_txt = []
-    for name, arr in [('clsrow', imp_cls), ('colmean', imp_col)]:
-        mean_imp = arr.mean(axis=0)
-        order = np.argsort(mean_imp)[::-1]
-        plot_importance_bar(mean_imp, f'global_{name}',
-                            f'mean of {len(arr)} LOSO folds', save_path, sort=True)
-        plot_importance_head(mean_imp, f'global_{name}', save_path)
+    mean_imp = imp_col.mean(axis=0)
+    order = np.argsort(mean_imp)[::-1]
+    plot_importance_bar(mean_imp, 'global_colmean',
+                        f'mean of {len(imp_col)} LOSO folds', save_path,
+                        sort=True)
+    plot_importance_head(mean_imp, 'global_colmean', save_path)
 
-        tops = [set(np.argsort(-a)[:8]) for a in arr]
-        cnt = np.zeros(NUM_CHANNELS, dtype=int)
-        for t in tops:
-            for i in t:
-                cnt[i] += 1
-        ranking_txt.append(f"===== Global Electrode Importance ({name}) =====")
-        for rank, i in enumerate(order, 1):
-            ranking_txt.append(f"{rank:2d}. {CHANNEL_NAMES[i]:4s} {mean_imp[i]:.6f}"
-                               f"   (top-8入り {cnt[i]}/{len(arr)} folds)")
-        ranking_txt.append("")
-        print(f"\n===== Electrode Importance ({name}) =====")
-        print("  " + ", ".join(CHANNEL_NAMES[i] for i in order))
+    tops = [set(np.argsort(-a)[:8]) for a in imp_col]
+    cnt = np.zeros(NUM_CHANNELS, dtype=int)
+    for top_indices in tops:
+        for i in top_indices:
+            cnt[i] += 1
+    ranking_txt.append("===== Global Electrode Importance (all-query mean) =====")
+    for rank, i in enumerate(order, 1):
+        ranking_txt.append(f"{rank:2d}. {CHANNEL_NAMES[i]:4s} {mean_imp[i]:.6f}"
+                           f"   (top-8入り {cnt[i]}/{len(imp_col)} folds)")
+    ranking_txt.append("")
+    print("\n===== Electrode Importance (all-query mean) =====")
+    print("  " + ", ".join(CHANNEL_NAMES[i] for i in order))
 
     plot_attention_matrix(gat_mats.mean(axis=0), 'global', pooled['accuracy'] * 100, save_path)
 
@@ -1003,37 +967,46 @@ def aggregate(save_path, manifest):
             'data_dir': DATA_DIR,
             'labeling_rule': manifest['labeling_rule'],
             'excluded_subjects': manifest['excluded_subjects'],
-            'kept_subjects': kept,
+            'all_subjects': all_subjects,
+            'training_subject_pool': all_subjects,
+            'eligible_subjects': expected_targets,
+            'outer_target_subjects': expected_targets,
+            'validation_pool_subjects': validation_pool,
+            'donor_only_subjects': donor_only_subjects,
             'target_subjects': targets,
-            'degenerate_targets': degenerate,
             'selected_epochs': selected_epochs,
             'validation_subjects_per_fold': validation_subjects_per_fold,
             'selection_pipeline': 'outer LOSO + inner subject-wise HoldOut with Optuna',
+            'temporal_cnn_variant': TEMPORAL_CNN_VARIANT,
             'inner_validation_subjects': (
                 len(next(iter(validation_subjects_per_fold.values())))
                 if validation_subjects_per_fold else 0),
             'standardization': 'inner train axis=0, population std',
             'per_subject': {str(s): fold_results[s] for s in targets},
-            'summary_all_targets': summary_all,
-            'summary_balanced_targets': summary_balanced,
+            'summary_eligible_targets': summary_all,
             'pooled': pooled,
         }, f, indent=2, ensure_ascii=False)
 
     with open(os.path.join(save_path, 'loso_report.txt'), 'w') as f:
-        f.write("===== LOSO 2-class (outer LOSO + inner subject-wise HoldOut + Optuna) =====\n")
+        f.write("===== LOSO 2-class (all-20 training pool, 13 test targets / "
+                "13 validation candidates) =====\n")
         f.write("metrics: Accuracy / Balanced Accuracy / Precision / Recall / F1-Score / Kappa "
                 "(Precision, Recall, F1 は macro 平均)\n")
         f.write(f"selected epochs per fold: {selected_epochs}\n")
         f.write(f"validation subjects per fold: {validation_subjects_per_fold}\n")
+        f.write(f"temporal CNN variant: {TEMPORAL_CNN_VARIANT}\n")
         f.write("standardization: train-only axis=0 mean/population std\n")
         f.write("Optuna objective: 0.4*balanced accuracy + 0.3*kappa "
                 "+ 0.3*weighted F1\n")
         f.write(f"labeling: {manifest['labeling_rule']}\n")
+        f.write(f"all training candidates: {all_subjects}\n")
+        f.write(f"outer test candidates: {expected_targets}\n")
+        f.write(f"inner validation candidates: {validation_pool}\n")
+        f.write(f"donor-only subjects: {donor_only_subjects}\n")
         f.write(f"target subjects  : {targets}\n")
         f.write("\n")
-        for title, summ in [('全ターゲット', summary_all),
-                            ('両クラスを持つセッションのみ', summary_balanced)]:
-            if summ is None or (title != '全ターゲット' and not degenerate):
+        for title, summ in [('test適格被験者', summary_all)]:
+            if summ is None:
                 continue
             f.write(f"----- {title} (n={summ['n_subjects']}) -----\n")
             for key, label in REPORT_METRICS:
@@ -1049,12 +1022,11 @@ def aggregate(save_path, manifest):
         f.write("Per subject:\n")
         for s in targets:
             r = fold_results[s]
-            mark = '' if s in balanced else '  ※退化'
-            f.write(f"  {s}: n={r['n_test']} (awake={r['n_class0_true']}/"
+            f.write(f"  Sub{s}: n={r['n_test']} (awake={r['n_class0_true']}/"
                     f"fatigue={r['n_class1_true']}) acc={r['acc']:.2f}% "
                     f"bacc={r['balanced_acc_pct']:.2f}% "
                     f"prec={r['macro_precision']:.4f} rec={r['macro_recall']:.4f} "
-                    f"f1={r['macro_f1']:.4f} kappa={r['kappa']:.4f}{mark}\n")
+                    f"f1={r['macro_f1']:.4f} kappa={r['kappa']:.4f}\n")
 
         f.write("\n===== Pooled Classification Report =====\n")
         f.write(report + "\n")
@@ -1355,7 +1327,7 @@ def main():
     ap.add_argument('--n-trials', type=int, default=N_TRIALS,
                     help=f'outer foldごとの総trial数（既定 {N_TRIALS}、DB再開分を含む）')
     ap.add_argument('--val-subjects', type=int, default=INNER_VAL_SUBJECTS,
-                    help=f'各outer foldの固定validationセッション数（既定 {INNER_VAL_SUBJECTS}）')
+                    help=f'各outer foldの固定validation被験者数（既定 {INNER_VAL_SUBJECTS}）')
     ap.add_argument('--patience', type=int, default=EARLY_STOP_PATIENCE,
                     help=f'inner学習のearly stopping patience（既定 {EARLY_STOP_PATIENCE}）')
     ap.add_argument('--pruner-startup', type=int, default=5,
@@ -1367,12 +1339,9 @@ def main():
     ap.add_argument('--no-optuna', action='store_true',
                     help='Optunaを行わず既定パラメータと--epochsで実行する')
     ap.add_argument('--limit-folds', type=int, default=None,
-                    help='先頭Nセッションだけ回す（動作確認用）')
-    ap.add_argument(
-        '--targets', choices=['all', 'balanced'], default='all',
-        help='all: 配置済み全セッション（既定） / balanced: 両クラスを十分持つセッション')
-    ap.add_argument('--only-target', type=str, default=None,
-                    help='このセッション1件のfoldだけ実行する（並列実行用）。集約は行わない。')
+                    help='先頭N名だけ回す（動作確認用）')
+    ap.add_argument('--only-target', type=int, default=None,
+                    help='適格被験者1名のfoldだけ実行する（並列実行用）。集約は行わない。')
     ap.add_argument('--aggregate-only', action='store_true',
                     help='学習せず、保存済みのfold結果から集約だけ行う')
     ap.add_argument('--multi-gpu', action='store_true',
@@ -1438,24 +1407,42 @@ def main():
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
 
-    manifest = build_manifest()
-    kept = manifest['kept_subjects']
-    balanced = manifest['loso_target_subjects']
-    if not kept:
-        raise SystemExit(
-            f'SEED-VIGデータが見つかりません: {DATA_DIR}\n'
-            'eeg_<session>.npy と label_<session>.npy を配置してください。')
-    if args.val_subjects >= len(kept) - 1:
-        ap.error('--val-subjects はouter trainセッション数未満にしてください')
+    with open(os.path.join(DATA_DIR, 'paper_manifest.json')) as file:
+        manifest = json.load(file)
+    all_subjects = manifest['all_subjects']
+    target_subjects, validation_pool, donor_only_subjects = (
+        experiment_subject_pools(manifest))
+    manifest_target_subjects = manifest['loso_target_subjects']
 
-    if args.only_target is not None and args.only_target not in kept:
-        ap.error(f'--only-target {args.only_target} はkept_subjectsに含まれません')
+    expected_all_subjects = list(range(1, 21))
+    if all_subjects != expected_all_subjects:
+        ap.error(
+            'manifestのall_subjectsがSub1--Sub20になっていません: '
+            f'{all_subjects}')
+    if (len(manifest_target_subjects) != 11
+            or len(set(manifest_target_subjects)) != 11):
+        ap.error(
+            'manifestの基準適格被験者が11名ではありません: '
+            f'{manifest_target_subjects}')
+    if not set(manifest_target_subjects).issubset(all_subjects):
+        ap.error('loso_target_subjectsにall_subjects外の被験者が含まれています')
+    if not set(EXTRA_TARGET_SUBJECTS).issubset(all_subjects):
+        ap.error(f'追加targetがall_subjects外です: {EXTRA_TARGET_SUBJECTS}')
+    if (set(manifest['donor_only_subjects'])
+            != set(all_subjects) - set(manifest_target_subjects)):
+        ap.error('manifestのdonor_only_subjectsがloso_target_subjectsに整合しません')
+    if (len(target_subjects) != 13 or validation_pool != target_subjects):
+        ap.error(
+            'outer targetとvalidation候補が共通の13名になっていません: '
+            f'targets={target_subjects}, validation={validation_pool}')
+    if args.val_subjects >= len(validation_pool) - 1:
+        ap.error('--val-subjects はtarget以外の適格被験者数未満にしてください')
 
-    # 親プロセスまたは通常実行だけが共有manifestを書き、multi-GPU worker間の
-    # 同時上書きを避ける。
-    if not args.scheduler_worker:
-        with open(os.path.join(save_path, 'manifest.json'), 'w') as f:
-            json.dump(manifest, f, indent=2, ensure_ascii=False)
+    if (args.only_target is not None
+            and args.only_target not in target_subjects):
+        ap.error(
+            f'--only-target {args.only_target} はtest適格被験者'
+            f'{target_subjects}に含まれません')
 
     if args.aggregate_only:
         aggregate(save_path, manifest)
@@ -1464,14 +1451,14 @@ def main():
     if args.only_target is not None:
         targets = [args.only_target]
     else:
-        targets = kept if args.targets == 'all' else balanced
+        targets = list(target_subjects)
         if args.limit_folds:
             targets = targets[:args.limit_folds]
 
     split_manifest = {}
     for target in targets:
         inner_train, validation_subjects = make_inner_holdout(
-            target, kept, args.val_subjects)
+            target, all_subjects, validation_pool, args.val_subjects)
         split_manifest[str(target)] = {
             'inner_train_subjects': inner_train,
             'validation_subjects': validation_subjects,
@@ -1483,22 +1470,33 @@ def main():
                       else f'holdout_split_target_{args.only_target}.json')
     with open(os.path.join(save_path, split_filename), 'w') as f:
         json.dump({
-            'all_subjects': kept,
+            'all_subjects': all_subjects,
+            'outer_target_subjects': target_subjects,
+            'eligible_validation_subjects': validation_pool,
+            'donor_only_subjects': donor_only_subjects,
+            'temporal_cnn_variant': TEMPORAL_CNN_VARIANT,
             'targets': targets,
             'n_validation_subjects': args.val_subjects,
-            'assignment': 'cyclic next sessions in canonical SUBJECT_LIST order',
+            'assignment': (
+                'validation: cyclic next subjects within eligible pool; '
+                'train: all remaining subjects'),
             'folds': split_manifest,
         }, f, indent=2, ensure_ascii=False)
 
     print(f"データ  : {DATA_DIR}")
     print("モデル  : gcn_select_net (Attention可視化あり)")
-    print(f"学習可  : {len(kept)}セッション {kept}")
-    print(f"ターゲット: {len(targets)}セッション {targets}")
+    print(f"Temporal CNN: {TEMPORAL_CNN_VARIANT} "
+          "(long k=5/d=2/RF=9, all k=7/d=2/RF=13)")
+    print(f"全学習候補      : {len(all_subjects)}名 {all_subjects}")
+    print(f"outer test候補  : {len(target_subjects)}名 {target_subjects}")
+    print(f"inner validation候補: {len(validation_pool)}名 {validation_pool}")
+    print(f"学習提供元のみ  : {len(donor_only_subjects)}名 {donor_only_subjects}")
+    print(f"今回のtarget    : {len(targets)}名 {targets}")
     if args.no_optuna:
         print(f"学習設定: Optunaなし (epochs={args.epochs}, params={merge_params()})")
     else:
         print(f"学習設定: outer LOSO + inner subject-wise HoldOut, "
-              f"Optuna {args.n_trials} trials, validation={args.val_subjects}セッション, "
+              f"Optuna {args.n_trials} trials, validation={args.val_subjects}名, "
               f"max_epochs={args.max_epochs}, patience={args.patience}")
         print(f"枝刈り  : MedianPruner(startup={args.pruner_startup}, "
               f"warmup={args.pruner_warmup} epochs)")
@@ -1518,7 +1516,9 @@ def main():
     print(f"Using device: {device}", flush=True)
 
     for target in targets:
-        run_fold(target, kept, args, device, save_path)
+        run_fold(
+            target, all_subjects, validation_pool,
+            args, device, save_path)
 
     if args.only_target is None:
         aggregate(save_path, manifest)

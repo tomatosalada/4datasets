@@ -170,7 +170,7 @@ class Config:
         self.intermediate_size = 256  # FeedForwardネットワークの中間層の次元数
         self.hidden_dropout_prob = 0.3 # ドロップアウト率
         self.num_embedding = 17       # SEED-VIGは17チャンネル
-        self.num_labels = 2           # SEED-VIGは2クラス
+        self.num_labels = 3           # SEED-VIGは3クラス
 
 def scaled_dot_product_attention(query, key, value):
     dim_k = torch.tensor(query.size(-1))  # torch.Sizeをテンソルに変換
@@ -418,11 +418,13 @@ class sfAttention(nn.Module):
         return U_cse + U_sse
     
 class MultiScalseTemporalConv(nn.Module):
-    def __init__(self, in_features, out_channels_per_path, dropout=0.3):
+    def __init__(self, in_features, out_channels_per_path, dropout=0.3,
+                 temporal_variant='tuab'):
         super().__init__()
         self.dropout_rate = dropout
         self.in_channels = in_features
         self.out_channels = out_channels_per_path
+        self.temporal_variant = temporal_variant
 
         #---短期カーネル---
         #kernel_size = (時間、周波数)
@@ -444,25 +446,65 @@ class MultiScalseTemporalConv(nn.Module):
             dilation=(2, 1)
         )
 
-        #---長期カーネル---
-        # RF: 5 (Dense)
-        self.conv_long = nn.Conv2d(
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            kernel_size=(5, 1),
-            padding=(2, 0),
-            dilation=(1, 1)
-        )
+        if temporal_variant == 'tuab':
+            # TUAB版と同じ密な時間畳み込み。
+            # 長期: RF=5、連続する5点を参照。
+            self.conv_long = nn.Conv2d(
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=(5, 1),
+                padding=(2, 0),
+                dilation=(1, 1)
+            )
 
-        #---全体カーネル---
-        # RF: 7 (Covers entire seq_len=6)
-        self.conv_all = nn.Conv2d(
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            kernel_size=(7, 1),
-            padding=(3, 0),
-            dilation=(1, 1)
-        )
+            # 全体: RF=7、連続する7点を参照。
+            self.conv_all = nn.Conv2d(
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=(7, 1),
+                padding=(3, 0),
+                dilation=(1, 1)
+            )
+        elif temporal_variant == 'original':
+            # 長期: RF=9、3点をdilation=4で参照。
+            self.conv_long = nn.Conv2d(
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=(3, 1),
+                padding=(4, 0),
+                dilation=(4, 1)
+            )
+
+            # 全体: RF=17、3点をdilation=8で参照。
+            self.conv_all = nn.Conv2d(
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=(3, 1),
+                padding=(8, 0),
+                dilation=(8, 1)
+            )
+        elif temporal_variant == 'moderate_dilation':
+            # 0.5秒×16 bin入力用。長期: RF=9、5点を1秒間隔で参照。
+            self.conv_long = nn.Conv2d(
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=(5, 1),
+                padding=(4, 0),
+                dilation=(2, 1)
+            )
+
+            # 全体: RF=13、7点を1秒間隔で参照。
+            self.conv_all = nn.Conv2d(
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=(7, 1),
+                padding=(6, 0),
+                dilation=(2, 1)
+            )
+        else:
+            raise ValueError(
+                f'unknown temporal_variant: {temporal_variant!r}; '
+                "expected 'tuab', 'original' or 'moderate_dilation'")
 
         self.bn = nn.BatchNorm2d(out_channels_per_path * 4)
         total_channels = out_channels_per_path * 4
@@ -494,13 +536,16 @@ class MultiScalseTemporalConv(nn.Module):
 # Toshi-Net:
 # Attention module + DSC module + transformer module
 class gcn_select_net(nn.Module):
-    def __init__(self, num_classes=2, hidden_size=64, num_hidden_layers=4, 
+    def __init__(self, num_classes=3, hidden_size=64, num_hidden_layers=4, 
                  transformer_dropout=0.3, cnn_dropout=0.3, gnn_dropout=0.3, 
-                 num_attention_heads=16, gnn_heads=4, cnn_out_channels=16):
+                 num_attention_heads=16, gnn_heads=4, cnn_out_channels=16,
+                 temporal_variant='tuab'):
         super(gcn_select_net, self).__init__()
         self.cnn_dropout = cnn_dropout
 
-        self.conv_time = MultiScalseTemporalConv(1, cnn_out_channels, dropout=cnn_dropout)
+        self.conv_time = MultiScalseTemporalConv(
+            1, cnn_out_channels, dropout=cnn_dropout,
+            temporal_variant=temporal_variant)
         cnn_hidden = cnn_out_channels * 4
 
         self.Atten = sfAttention(in_channels=cnn_hidden) 
@@ -513,7 +558,7 @@ class gcn_select_net(nn.Module):
         self.global_pool2 = nn.AdaptiveAvgPool2d((2, 2))
 
         # SEED-VIG用のグラフ
-        self.graph_path = "/mnt/data/toshiki.ohno/EEG_fatigue/EEG_analysis_SEED-VIG/GNN/graph_path/common_graph_edge_index_full_17ch.pt"
+        self.graph_path = "/mnt/data/toshiki.ohno/EEG_fatigue/EEG_analysis_SEED-VIG/pre_trained_model/common_graph_edge_index_mi_0.2_50_17ch.pt"
         self.edge_index = torch.load(self.graph_path, weights_only=False)
 
         #transformer

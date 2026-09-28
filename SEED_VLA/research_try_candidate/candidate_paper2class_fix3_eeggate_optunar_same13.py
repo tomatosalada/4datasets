@@ -1,9 +1,9 @@
 """VLAの固定電極候補を保存済みfold別Optuna条件のLOSOで比較する。
 
-LOSO法はratio_fixdynamic_eeggate_optunar.pyと同一で、このコード自身はOptuna探索を
-行わない。全20名を学習候補とし、target以外の19名でGate + EEGNetを学習して、
-manifestで適格な11名だけをouter testにする。提案法の固定電極は全fold共通の
-global importance rankingから選ぶ。
+LOSO法はratio_fixdynamic_eeggate_optunar_best_same_13.pyと同一で、このコード自身は
+Optuna探索を行わない。全20名を学習候補とし、target以外の19名でGate + EEGNetを
+学習する。outer testはmanifestの基準適格11名にSub3・Sub20を加えた13名とする。
+提案法の固定電極は全fold共通のglobal importance rankingから選ぶ。
 """
 
 import argparse
@@ -36,7 +36,7 @@ from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
                              recall_score, confusion_matrix, ConfusionMatrixDisplay)
 from torch.utils.data import DataLoader, TensorDataset
 
-from select_net.select_net_class_optunar import gcn_select_net
+from select_net.select_net_class_optunar_same import gcn_select_net
 from model.EEGNet import CustomEEGNet
 
 warnings.filterwarnings("ignore")
@@ -46,15 +46,19 @@ warnings.filterwarnings("ignore")
 # =========================================================================
 DATA_DIR = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_VLA/processdData/'
             'subject_wise_2class_allsubject')
+
+# ratioの13名実験と同じouter test対象にする。
+EXTRA_TARGET_SUBJECTS = (3, 20)
+
 CHEAT_SHEET_DIR = os.environ.get(
     'CHEAT_SHEET_DIR',
     '/mnt/data/toshiki.ohno/EEG_fatigue/EEG_VLA/'
-    'LOSO_pretrainedmodel/LOSO_Optuna_All20_Eligible11_InnerHoldout3')
+    'optunar_LOSO/LOSO_GCN_Optuna_All20Train_best_13people_same')
 CHEAT_SHEET_TAG = '_'.join([p for p in CHEAT_SHEET_DIR.rstrip('/').split('/')[-2:] if p])
 
 RESEARCH_BASE_DIR = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_VLA/'
                      'research_fix_electrode/'
-                     'results_candidates_paper2class_fix4_eeggate_optunar/')
+                     'results_candidates_paper2class_fix3_eeggate_optunar_same13/')
 
 NUM_CLASSES = 2
 CLASS_NAMES = ['Awake', 'Fatigue']
@@ -64,7 +68,7 @@ CLASS_ORDER = [CLASS_LABELS[i] for i in sorted(CLASS_LABELS)]
 # チャネル名 (18ch 10-20)
 CHANNEL_NAMES = ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8',
                  'T3', 'C3', 'Cz', 'C4', 'T4',
-                 'T5', 'P3', 'P4', 'T6', 'O1', 'O2']
+                 'T5', 'P3', 'T6', 'P4', 'O1', 'O2']
 NUM_CHANNELS = len(CHANNEL_NAMES)
 NUM_BANDS = 5
 CH_INDEX = {name: i for i, name in enumerate(CHANNEL_NAMES)}
@@ -78,12 +82,13 @@ COORDS = {
 }
 
 GLOBAL_IMPORTANCE_RANKING = [
-    'O2', 'O1', 'Fp1', 'Cz', 'T5', 'P4', 'Fp2', 'C4', 'T3', 'T6', 'T4', 'F4', 'F3', 'F7', 'Fz', 'P3', 'C3', 'F8'
+    'O1', 'T5', 'P4', 'O2', 'F8', 'Fz', 'Fp2', 'T6', 'T3', 'T4', 'Fp1', 'Cz', 'F7', 'F4', 'C4', 'C3', 'F3', 'P3'
 ]
 assert sorted(GLOBAL_IMPORTANCE_RANKING) == sorted(CHANNEL_NAMES)
 
-DEFAULT_TOTAL_ELECTRODES = 8
-DEFAULT_FIXED_ELECTRODES = 4
+# ratioの13名実験で使用した総電極数。候補比較では4本を固定し、残り7本を動的選定する。
+DEFAULT_TOTAL_ELECTRODES = 11
+DEFAULT_FIXED_ELECTRODES = 3
 
 SEED = 42
 BATCH_SIZE = 128
@@ -103,10 +108,10 @@ GATE_HINTS = False
 SELECT = 'topk'
 MASK_RANDOMIZE = 0.3
 
-PROCESSES_PER_GPU = 4
+PROCESSES_PER_GPU = 8
 TEACHER_CACHE_DIR = ('/mnt/data/toshiki.ohno/EEG_fatigue/EEG_VLA/'
                      'research_number_of_electrode/'
-                     'results_bestnum_paper2class_eeggate_optunar/teacher_cache')
+                     'results_bestnum_paper2class_eeggate_optunar_best_same_13/teacher_cache')
 
 # 報告する評価指標
 METRICS = [('macro_f1', 'Macro F1'),
@@ -136,63 +141,88 @@ PCT_METRICS = {'acc', 'balanced_acc_pct'}
 CANDIDATES = {
     'proposed': dict(
         channels=None,
-        ranking='global',
+        ranking='global',       # 常に全fold共通ランキング
         group='proposed',
-        rationale='提案手法。全fold共通の重要度ランキングの上位K本を固定する。'),
+        rationale='提案手法。全fold共通の重要度ランキング (教師の colmean を'
+                  '名前訂正したもの: O1, O2, Fp1, F8, T6, F7, ...) 上位3本 '
+                  '(O1, O2, Fp1) を固定する。'),
 
     'occipital_alpha': dict(
-        channels=['O1', 'O2', 'P3', 'P4'], 
+        channels=['O1', 'O2', 'Cz'],
         ranking=None,
         group='literature',
-        rationale='後頭の左右1対(O1/O2)と頭頂(P3/P4)で、α波の変化を後方広域で捉える構成。'),
+        rationale='眠気の進行に伴うα帯域パワーの増大は後頭で最大となる。閉眼・傾眠時の'
+                  'α紡錘の主分布であり、PERCLOS ベースの疲労ラベルと最も直接に対応すると'
+                  '期待される領域。後頭の左右1対に、αが広がる正中 (Cz) を加えた3本。'
+                  '頭頂正中 (Pz) は基準電極で使えないため Cz で代替している。'),
 
     'frontal_midline_theta': dict(
-        channels=['Fz', 'F3', 'F4', 'Fp1'], 
+        channels=['Fz', 'F3', 'F4'],
         ranking=None,
         group='literature',
-        rationale='前頭正中θ。Fzを正中アンカーにし、左右の前頭(F3/F4)と前頭極(Fp1)を加えた構成。'),
+        rationale='精神疲労・持続的注意課題で増大する前頭正中θ (Fz/FCz 優位)。'
+                  'この18chには FCz が無いため Fz を正中アンカーにし、左右の前頭 '
+                  '(F3/F4) を加えて前頭θの分布を覆う。左右対称。'),
 
-    'prefrontal_wearable': dict(
-        channels=['Fp1', 'Fp2', 'F7', 'F8'], 
+    'frontal_wearable': dict(
+        channels=['Fp1', 'Fp2', 'Fz'],
         ranking=None,
         group='literature',
-        rationale='前額部〜前頭側部のみで構成した、ウェアラブルデバイスでの実運用を想定した形態。'),
+        rationale='前額部のみで構成した、ヘッドバンド型ウェアラブル EEG の実運用形態'
+                  '(Fp1/Fp2 に正中 Fpz 相当として Fz を加えた3本)。装着が容易で毛髪の'
+                  '影響を受けない反面、眼電・筋電アーチファクトを最も受けやすい。'
+                  '実装可能性の観点で重要な対照。'),
 
-    'central_parietal': dict(
-        channels=['Cz', 'C3', 'C4', 'P3'], 
+    'central_region': dict(
+        channels=['Cz', 'C3', 'C4'],
         ranking=None,
         group='literature',
-        rationale='感覚運動野を中心に、Czを正中としてC3/C4と頭頂(P3)を加えた構成。'),
+        rationale='中心 (感覚運動野)。覚醒度低下に伴う μ/α の変化と注意資源の減衰を'
+                  '捉える領域で、側頭筋由来の筋電アーチファクトが最も少ない。'
+                  '頭頂正中 (Pz) は基準電極で使えないため、正中は Cz で代表させている。'
+                  '左右対称。'),
 
     'frontal_occipital': dict(
-        channels=['Fz', 'Cz', 'O1', 'O2'], 
+        channels=['Fz', 'O1', 'O2'],
         ranking=None,
         group='literature',
-        rationale='前頭θと後頭αの増大を同時に取るため、前頭正中(Fz)・中心(Cz)と後頭(O1/O2)で構成。'),
+        rationale='前頭θの増大と後頭αの増大という、疲労で逆向きに動く2つの指標を'
+                  '同時に取る構成。θ/α比のような比指標を成立させる最小構成でもある。'
+                  'occipital_alpha と対にすると、正中アンカーを Cz から Fz に'
+                  '替えた効果だけを取り出せる。'),
 
     'temporal_lateral': dict(
-        channels=['T3', 'T4', 'T5', 'T6'], 
+        channels=['T3', 'T4', 'Cz'],
         ranking=None,
         group='literature',
-        rationale='運転疲労の推定に有効とされる両側の側頭部(T3/T4)と後側頭(T5/T6)。'),
+        rationale='後側頭の左右1対に正中 (Cz) を加えた構成。SEED-VIG 系の報告で'
+                  '側頭・後側頭が運転疲労の推定に有効とされることに対応する。'
+                  'occipital_alpha と対にすると、後頭 (O1/O2) と後側頭 (T5/T6) の'
+                  '差だけを取り出せる。'),
 
     'uniform_coverage': dict(
-        channels=['F3', 'F4', 'P3', 'P4'], 
+        channels=['Fp1', 'Cz', 'O2'],
         ranking=None,
         group='literature',
-        rationale='前頭と頭頂から均等に左右対称で2本ずつ取った空間サンプリング。'),
+        rationale='特定の生理学的仮説を置かず、前頭極/中心/後頭から1本ずつを'
+                  '左右交互に取った均等空間サンプリング。'
+                  '「領域を絞ること」自体に意味があるのかを判定する基準線。'),
 
     'left_hemisphere': dict(
-        channels=['Fp1', 'F3', 'C3', 'O1'], 
+        channels=['Fp1', 'C3', 'O1'],
         ranking=None,
         group='control',
-        rationale='左半球のみ(対照)。前頭極から後頭までの縦鎖を片側だけで取る。'),
+        rationale='左半球のみ (対照)。前頭-中心-後頭の縦鎖を片側だけで取る。'
+                  '側方性が一方に偏った場合の影響を見る。'),
 
     'right_hemisphere': dict(
-        channels=['Fp2', 'F4', 'C4', 'O2'], 
+        channels=['Fp2', 'C4', 'O2'],
         ranking=None,
         group='control',
-        rationale='右半球のみ(対照)。left_hemisphere の鏡像。'),
+        rationale='右半球のみ (対照)。left_hemisphere の完全な鏡像なので、両者の差は'
+                  'そのまま左右非対称性の効果になる。この3本は AASM 睡眠段階判定の'
+                  '推奨導出 (F4/C4/P4) と同一であり、臨床標準の最小モンタージュとしても'
+                  '読める。'),
 }
 
 GROUP_COLORS = {'proposed': '#c0504d', 'literature': '#3b6fb6', 'control': '#9aa4b1',
@@ -215,6 +245,20 @@ def normalize_subject(x, mode):
 
 def prep_tag(normalize):
     return f'{CHEAT_SHEET_TAG}_{normalize}'
+
+
+def experiment_subject_pools(manifest):
+    """ratioと同じ、全20名の学習プールと13名のouter targetを返す。"""
+    all_subjects = list(manifest.get('all_subjects', manifest['kept_subjects']))
+    target_subjects = sorted(dict.fromkeys(
+        list(manifest['loso_target_subjects']) + list(EXTRA_TARGET_SUBJECTS)))
+    unknown = [s for s in target_subjects if s not in all_subjects]
+    if unknown:
+        raise ValueError(f'target候補がall_subjectsに含まれていません: {unknown}')
+    if len(target_subjects) != 13:
+        raise ValueError(f'outer target候補が13名になっていません: {target_subjects}')
+    donor_only_subjects = [s for s in all_subjects if s not in target_subjects]
+    return all_subjects, target_subjects, donor_only_subjects
 
 
 def load_optuna_fold_config(target):
@@ -361,8 +405,15 @@ def fold_fixed_channels(name, spec, fixed_n, teacher_cache, train_subjects, rank
     # 提案法は全foldで同じ固定電極を使う。teacher_cacheはGate入力にのみ使用する。
     return list(GLOBAL_IMPORTANCE_RANKING[:fixed_n])
 
+LEGACY_CANDIDATE_IDS = {
+    'frontal_wearable': 'prefrontal_wearable',
+    'central_region': 'central_parietal',
+}
+
 def candidate_dir(base_dir, total, fixed, name):
-    return os.path.join(base_dir, f'total{total}_fix{fixed}', f'cand_{name}')
+    # 名称変更前の学習済み結果をそのまま再利用する。
+    disk_name = LEGACY_CANDIDATE_IDS.get(name, name)
+    return os.path.join(base_dir, f'total{total}_fix{fixed}', f'cand_{disk_name}')
 
 # =========================================================================
 # 1. Models & Gate Mechanism
@@ -620,7 +671,8 @@ def run_fold(name, spec, target, kept, total, fixed, epochs,
         raise ValueError(
             f'{optuna_config_path}: weight_decay は0以上が必要です: {weight_decay}')
 
-    seed = SEED + target
+    # ratioのsame13実験と同じseedを全foldで使用する。
+    seed = SEED
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
@@ -922,7 +974,7 @@ def aggregate_candidate(name, spec, total, fixed, base_dir, manifest, verbose=Tr
     files = sorted(glob.glob(os.path.join(cand_dir, 'fold_target*.json')))
     if not files: return None
 
-    balanced = manifest['loso_target_subjects']
+    balanced = experiment_subject_pools(manifest)[1]
     fold_results, arrays = {}, {}
     for p in files:
         r = json.load(open(p))
@@ -1072,7 +1124,7 @@ def paired_table(per_fold, cands, subset, metric, ref='proposed'):
 def aggregate_all(total, fixed, base_dir, manifest, cands):
     res_dir = os.path.join(base_dir, f'total{total}_fix{fixed}')
     os.makedirs(res_dir, exist_ok=True)
-    balanced = manifest['loso_target_subjects']
+    all_subjects, balanced, donor_only_subjects = experiment_subject_pools(manifest)
 
     details, per_fold = [], {}
     for name, spec in cands.items():
@@ -1216,9 +1268,11 @@ def aggregate_all(total, fixed, base_dir, manifest, cands):
                    'labeling_rule': manifest['labeling_rule'],
                    'excluded_subjects': manifest['excluded_subjects'],
                    'kept_subjects': manifest['kept_subjects'],
-                   'all_subjects': manifest.get('all_subjects', manifest['kept_subjects']),
-                   'donor_only_subjects': manifest.get('donor_only_subjects', []),
+                   'all_subjects': all_subjects,
+                   'donor_only_subjects': donor_only_subjects,
                    'balanced_targets': balanced,
+                   'outer_target_subjects': balanced,
+                   'extra_target_subjects': list(EXTRA_TARGET_SUBJECTS),
                    'candidates': [d['candidate'] for d in details],
                    'per_candidate': details}, f, indent=2, ensure_ascii=False)
 
@@ -1246,7 +1300,7 @@ def main():
     ap.add_argument('--only-target', type=int, default=None,
                     help='この被験者1名のfoldだけ実行する')
     ap.add_argument('--targets', choices=['eligible', 'balanced'], default='eligible',
-                    help='outer testは適格11名のみ。balancedは旧名のalias')
+                    help='outer testは基準適格11名にSub3・Sub20を加えた13名。balancedは旧名のalias')
     ap.add_argument('--limit-folds', type=int, default=None)
     ap.add_argument('--random-controls', type=int, default=0)
     ap.add_argument('--teacher-importance', choices=['col', 'cls'], default='col',
@@ -1281,8 +1335,7 @@ def main():
         ap.error('--fixed は0〜--totalを指定してください')
 
     manifest = json.load(open(os.path.join(DATA_DIR, 'paper_manifest.json')))
-    all_subjects = manifest.get('all_subjects', manifest['kept_subjects'])
-    eligible = manifest['loso_target_subjects']
+    all_subjects, eligible, donor_only_subjects = experiment_subject_pools(manifest)
 
     cands = resolve_candidates(args.fixed, args.random_controls, args.ranking)
     only = list(args.only or [])
@@ -1307,9 +1360,10 @@ def main():
 
     print(f"データ    : {DATA_DIR}")
     print(f"Optuna教師: {CHEAT_SHEET_DIR} (foldごとの保存済み結果を使用)")
+    print(f"ラベル    : {manifest['labeling_rule']}")
     print(f"全学習候補: {len(all_subjects)}名 {all_subjects}")
     print(f"test適格  : {len(eligible)}名 {eligible}")
-    print(f"学習提供元のみ: {manifest.get('donor_only_subjects', [])}")
+    print(f"学習提供元のみ: {donor_only_subjects}")
     print(f"今回のtarget: {len(targets)}名 {targets}")
     print(f"総電極数  : {args.total} / 固定 {args.fixed} / 動的 {args.total - args.fixed}")
     print("Optuna    : 探索は実行せず、保存済みfold別結果のみ利用")
